@@ -66,6 +66,10 @@ export interface OutboundMessage {
   parseMode?: 'HTML' | 'Markdown' | 'plain';
   /** Inline keyboard buttons */
   inlineButtons?: InlineButton[][];
+  /** Structured permission metadata (for adapters that build native cards) */
+  permissionMeta?: PermissionCardMeta;
+  /** Structured question metadata for AskUserQuestion cards */
+  questionMeta?: QuestionCardMeta;
   /** If replying to a specific message */
   replyToMessageId?: string;
 }
@@ -74,6 +78,23 @@ export interface OutboundMessage {
 export interface InlineButton {
   text: string;
   callbackData: string;
+}
+
+/** Structured metadata for permission cards (avoids HTML parsing in adapters) */
+export interface PermissionCardMeta {
+  toolName: string;
+  toolInput: Record<string, unknown>;
+}
+
+/** Structured metadata for AskUserQuestion cards */
+export interface QuestionCardMeta {
+  permissionRequestId: string;
+  questions: Array<{
+    question: string;
+    header: string;
+    options: Array<{ label: string; description: string }>;
+    multiSelect: boolean;
+  }>;
 }
 
 /** Result of sending a message via an adapter */
@@ -165,6 +186,9 @@ export interface StreamingPreviewState {
   degraded: boolean;         // set true after API failure → skip further previews
   throttleTimer: ReturnType<typeof setTimeout> | null;
   pendingText: string;       // latest accumulated text (may not yet be sent due to throttle)
+  /** Character offset into the full accumulated text — text before this offset
+   *  was already finalized in a previous preview segment. */
+  textOffset: number;
 }
 
 // ── Config ─────────────────────────────────────────────────────
@@ -175,5 +199,6 @@ export const PLATFORM_LIMITS: Record<string, number> = {
   discord: 2000,
   slack: 40000,
   feishu: 30000,
+  lark: 30000,
   qq: 2000,
 };

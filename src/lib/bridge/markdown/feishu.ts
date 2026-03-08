@@ -23,12 +23,28 @@ export function hasComplexMarkdown(text: string): boolean {
 
 /**
  * Preprocess markdown for Feishu rendering.
- * Only ensures code fences have a newline before them.
- * Does NOT touch the text after ``` to preserve language tags like ```python.
+ * - Converts headings (# ~ ######) to bold text with spacing (Lark renders
+ *   headings without vertical padding, so bold + blank lines looks better).
+ * - Ensures code fences have a newline before them.
+ * Does NOT touch content inside code blocks.
  */
 export function preprocessFeishuMarkdown(text: string): string {
+  // Split by code fences to avoid modifying headings inside code blocks
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  for (let i = 0; i < parts.length; i += 1) {
+    // Odd indices are code blocks — skip them
+    if (i % 2 === 1) continue;
+    // Convert headings to bold with surrounding blank lines
+    parts[i] = parts[i]!.replace(/^(#{1,6})\s+(.+)$/gm, (_match, _hashes, title) => {
+      return `\n**${title}**\n`;
+    });
+  }
+  let result = parts.join('');
   // Ensure ``` has newline before it (unless at start of text)
-  return text.replace(/([^\n])```/g, '$1\n```');
+  result = result.replace(/([^\n])```/g, '$1\n```');
+  // Clean up excessive blank lines (3+ → 2)
+  result = result.replace(/\n{3,}/g, '\n\n');
+  return result.trim();
 }
 
 /**

@@ -66,10 +66,10 @@ export abstract class BaseChannelAdapter {
   abstract isAuthorized(userId: string, chatId: string): boolean;
 
   /** Called when message processing starts (e.g., typing indicator). */
-  onMessageStart?(_chatId: string): void;
+  onMessageStart?(_chatId: string, _messageId?: string): void;
 
   /** Called when message processing ends. */
-  onMessageEnd?(_chatId: string): void;
+  onMessageEnd?(_chatId: string, _messageId?: string): void;
 
   /**
    * Acknowledge that an update has been fully processed.

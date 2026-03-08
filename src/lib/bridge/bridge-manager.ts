@@ -47,6 +47,8 @@ interface StreamConfig {
 const STREAM_DEFAULTS: Record<string, StreamConfig> = {
   telegram: { intervalMs: 700, minDeltaChars: 20, maxChars: 3900 },
   discord: { intervalMs: 1500, minDeltaChars: 40, maxChars: 1900 },
+  feishu: { intervalMs: 500, minDeltaChars: 20, maxChars: 28000 },
+  lark: { intervalMs: 500, minDeltaChars: 20, maxChars: 28000 },
 };
 
 function getStreamConfig(channelType = 'telegram'): StreamConfig {
@@ -119,7 +121,7 @@ async function deliverResponse(
     }
     return { ok: true };
   }
-  if (adapter.channelType === 'feishu') {
+  if (adapter.channelType === 'feishu' || adapter.channelType === 'lark') {
     // Feishu: pass markdown through for adapter to format as post/card
     return deliver(adapter, {
       address,
@@ -366,9 +368,11 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
         const msg = await adapter.consumeOne();
         if (!msg) continue; // Adapter stopped
 
-        // Callback queries and commands are lightweight — process inline.
-        // Regular messages use per-session locking for concurrency.
-        if (msg.callbackData || msg.text.trim().startsWith('/')) {
+        // Callback queries, commands, and pending text answers are lightweight
+        // — process inline (bypass session lock). Text answers for "Other"
+        // MUST bypass the lock because the lock holder is waiting for this answer.
+        if (msg.callbackData || msg.text.trim().startsWith('/')
+            || broker.hasPendingTextAnswer(msg.address.chatId)) {
           await handleMessage(adapter, msg);
         } else {
           const binding = router.resolve(msg.address);
@@ -427,11 +431,18 @@ async function handleMessage(
     }
   };
 
-  // Handle callback queries (permission buttons)
+  // Handle callback queries (permission buttons or question answers)
   if (msg.callbackData) {
-    const handled = broker.handlePermissionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId);
-    if (handled) {
-      // Send confirmation
+    let handled = false;
+    if (msg.callbackData.startsWith('askq_other:')) {
+      handled = broker.handleOtherCallback(msg.callbackData, msg.address.chatId);
+    } else if (msg.callbackData.startsWith('askq:')) {
+      handled = broker.handleQuestionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId);
+    } else {
+      handled = broker.handlePermissionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId);
+    }
+    if (handled && adapter.channelType !== 'lark') {
+      // Send confirmation (skip for lark — card updates visually via callback response)
       const confirmMsg: OutboundMessage = {
         address: msg.address,
         text: 'Permission response recorded.',
@@ -445,6 +456,21 @@ async function handleMessage(
 
   const rawText = msg.text.trim();
   const hasAttachments = msg.attachments && msg.attachments.length > 0;
+
+  // Check if this chat has a pending "Other" text answer
+  if (rawText && broker.hasPendingTextAnswer(msg.address.chatId)) {
+    const answered = broker.handleTextAnswer(msg.address.chatId, rawText);
+    if (answered) {
+      await deliver(adapter, {
+        address: msg.address,
+        text: 'Answer recorded.',
+        parseMode: 'plain',
+        replyToMessageId: msg.messageId,
+      });
+      ack();
+      return;
+    }
+  }
 
   // Handle image-only download failures — surface error to user instead of silently dropping
   if (!rawText && !hasAttachments) {
@@ -487,7 +513,7 @@ async function handleMessage(
   const binding = router.resolve(msg.address);
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
-  adapter.onMessageStart?.(msg.address.chatId);
+  adapter.onMessageStart?.(msg.address.chatId, msg.messageId);
 
   // Create an AbortController so /stop can cancel this task externally
   const taskAbort = new AbortController();
@@ -506,6 +532,7 @@ async function handleMessage(
       degraded: false,
       throttleTimer: null,
       pendingText: '',
+      textOffset: 0,
     };
   }
 
@@ -517,10 +544,13 @@ async function handleMessage(
     const cfg = streamCfg!;
     if (ps.degraded) return;
 
+    // Slice from textOffset to get only the current segment's text
+    const segmentText = fullText.slice(ps.textOffset);
+
     // Truncate to maxChars + ellipsis
-    ps.pendingText = fullText.length > cfg.maxChars
-      ? fullText.slice(0, cfg.maxChars) + '...'
-      : fullText;
+    ps.pendingText = segmentText.length > cfg.maxChars
+      ? segmentText.slice(0, cfg.maxChars) + '...'
+      : segmentText;
 
     const delta = ps.pendingText.length - ps.lastSentText.length;
     const elapsed = Date.now() - ps.lastSentAt;
@@ -562,6 +592,30 @@ async function handleMessage(
     const promptText = text || (hasAttachments ? 'Describe this image.' : '');
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
+      // ── Finalize current preview segment before permission card ──
+      if (previewState && streamCfg && !previewState.degraded && previewState.lastSentAt > 0) {
+        // Cancel pending throttle timer
+        if (previewState.throttleTimer) {
+          clearTimeout(previewState.throttleTimer);
+          previewState.throttleTimer = null;
+        }
+        // Final flush of buffered text
+        if (previewState.pendingText !== previewState.lastSentText) {
+          flushPreview(adapter, previewState, streamCfg);
+        }
+        // End the current preview card (keeps it as a finalized message)
+        adapter.endPreview?.(msg.address.chatId, previewState.draftId);
+
+        // Reset for next segment
+        previewState.textOffset += previewState.pendingText.length;
+        previewState.draftId = generateDraftId();
+        previewState.lastSentText = '';
+        previewState.lastSentAt = 0;
+        previewState.pendingText = '';
+        // Note: don't reset degraded — if degraded, stay degraded
+      }
+
+      // Forward permission request to IM
       await broker.forwardPermissionRequest(
         adapter,
         msg.address,
@@ -574,8 +628,11 @@ async function handleMessage(
       );
     }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText);
 
-    // Send response text — render via channel-appropriate format
-    if (result.responseText) {
+    // Send response text — render via channel-appropriate format.
+    // If streaming preview was active and not degraded, the preview card already
+    // contains the final text — skip the redundant deliverResponse.
+    const previewHandledDelivery = previewState && !previewState.degraded && previewState.lastSentAt > 0;
+    if (result.responseText && !previewHandledDelivery) {
       await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
     } else if (result.hasError) {
       const errorResponse: OutboundMessage = {
@@ -599,18 +656,22 @@ async function handleMessage(
       } catch { /* best effort */ }
     }
   } finally {
-    // Clean up preview state
+    // Clean up preview state — flush any buffered text before ending
     if (previewState) {
       if (previewState.throttleTimer) {
         clearTimeout(previewState.throttleTimer);
         previewState.throttleTimer = null;
+      }
+      // Final flush to ensure the preview card has the latest text
+      if (streamCfg && !previewState.degraded && previewState.pendingText !== previewState.lastSentText) {
+        flushPreview(adapter, previewState, streamCfg);
       }
       adapter.endPreview?.(msg.address.chatId, previewState.draftId);
     }
 
     state.activeTasks.delete(binding.codepilotSessionId);
     // Notify adapter that message processing ended
-    adapter.onMessageEnd?.(msg.address.chatId);
+    adapter.onMessageEnd?.(msg.address.chatId, msg.messageId);
     // Commit the offset only after full processing (success or failure)
     ack();
   }
