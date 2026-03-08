@@ -104,6 +104,7 @@ export interface PermissionLinkInput {
   chatId: string;
   messageId: string;
   toolName: string;
+  toolInput?: Record<string, unknown>;
   suggestions: string;
 }
 
@@ -113,6 +114,8 @@ export interface PermissionLinkRecord {
   chatId: string;
   messageId: string;
   resolved: boolean;
+  toolName: string;
+  toolInput?: Record<string, unknown>;
   suggestions: string;
 }
 
@@ -203,7 +206,7 @@ export interface StreamChatParams {
   sessionId: string;
   sdkSessionId?: string;
   model?: string;
-  systemPrompt?: string;
+  systemPrompt?: string | { type: 'preset'; preset: 'claude_code'; append?: string };
   workingDirectory?: string;
   abortController?: AbortController;
   permissionMode?: string;
@@ -228,6 +231,7 @@ export interface PermissionResolution {
   behavior: 'allow' | 'deny';
   message?: string;
   updatedPermissions?: unknown[];
+  data?: Record<string, unknown>;
 }
 
 export interface PermissionGateway {

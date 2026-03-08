@@ -21,6 +21,7 @@ import type {
   ChannelType,
   InboundMessage,
   OutboundMessage,
+  PreviewCapabilities,
   SendResult,
 } from '../types.js';
 import type { FileAttachment } from '../types.js';
@@ -82,19 +83,31 @@ const MIME_BY_TYPE: Record<string, string> = {
 export class FeishuAdapter extends BaseChannelAdapter {
   readonly channelType: ChannelType = 'feishu';
 
-  private running = false;
+  protected running = false;
   private queue: InboundMessage[] = [];
   private waiters: Array<(msg: InboundMessage | null) => void> = [];
   private wsClient: lark.WSClient | null = null;
-  private restClient: lark.Client | null = null;
+  protected restClient: lark.Client | null = null;
   private seenMessageIds = new Map<string, boolean>();
-  private botOpenId: string | null = null;
+  protected botOpenId: string | null = null;
   /** All known bot IDs (open_id, user_id, union_id) for mention matching. */
   private botIds = new Set<string>();
-  /** Track last incoming message ID per chat for typing indicator. */
+  /** Track last incoming message ID per chat (fallback for typing indicator). */
   private lastIncomingMessageId = new Map<string, string>();
-  /** Track active typing reaction IDs per chat for cleanup. */
+  /** Track active typing reaction IDs per message for cleanup. */
   private typingReactions = new Map<string, string>();
+  /** Track preview message IDs per chat for streaming updates. */
+  private previewMessages = new Map<string, string>();
+  /** Guard: in-flight card creation per chat (prevents duplicate creates). */
+  private previewCreating = new Set<string>();
+  /** Chats where preview has permanently degraded (API not supported). */
+  private previewDegraded = new Set<string>();
+  /** Queued card content to PATCH after in-flight create resolves. */
+  private previewQueuedUpdate = new Map<string, string>();
+
+  protected setting(key: string): string {
+    return getBridgeContext().store.getSetting(`bridge_${this.channelType}_${key}`) || '';
+  }
 
   // ── Lifecycle ───────────────────────────────────────────────
 
@@ -107,9 +120,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
 
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id') || '';
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret') || '';
-    const domainSetting = getBridgeContext().store.getSetting('bridge_feishu_domain') || 'feishu';
+    const appId = this.setting('app_id');
+    const appSecret = this.setting('app_secret');
+    const domainSetting = this.setting('domain') || 'feishu';
     const domain = domainSetting === 'lark'
       ? lark.Domain.Lark
       : lark.Domain.Feishu;
@@ -126,17 +139,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     this.running = true;
 
-    // Create EventDispatcher and register event handlers.
-    // NOTE: card.action.trigger requires HTTP webhook (not supported via WSClient).
-    // Openclaw uses an HTTP server for card callbacks — CodePilot is a desktop app
-    // without a public endpoint, so we rely on text-based /perm commands instead.
+    // WebSocket mode
     const dispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data) => {
         await this.handleIncomingEvent(data as FeishuMessageEventData);
       },
     });
 
-    // Create and start WSClient
     this.wsClient = new lark.WSClient({
       appId,
       appSecret,
@@ -144,7 +153,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     });
     this.wsClient.start({ eventDispatcher: dispatcher });
 
-    console.log('[feishu-adapter] Started (botOpenId:', this.botOpenId || 'unknown', ')');
+    console.log('[feishu-adapter] Started in ws mode (botOpenId:', this.botOpenId || 'unknown', ')');
   }
 
   async stop(): Promise<void> {
@@ -160,6 +169,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
       this.wsClient = null;
     }
+
     this.restClient = null;
 
     // Reject all waiting consumers
@@ -172,6 +182,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.seenMessageIds.clear();
     this.lastIncomingMessageId.clear();
     this.typingReactions.clear();
+    this.previewMessages.clear();
+    this.previewCreating.clear();
+    this.previewDegraded.clear();
+    this.previewQueuedUpdate.clear();
 
     console.log('[feishu-adapter] Stopped');
   }
@@ -193,7 +207,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     });
   }
 
-  private enqueue(msg: InboundMessage): void {
+  protected enqueue(msg: InboundMessage): void {
     const waiter = this.waiters.shift();
     if (waiter) {
       waiter(msg);
@@ -208,19 +222,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Add a "Typing" emoji reaction to the user's message.
    * Called by bridge-manager via onMessageStart().
    */
-  onMessageStart(chatId: string): void {
-    const messageId = this.lastIncomingMessageId.get(chatId);
-    if (!messageId || !this.restClient) return;
+  onMessageStart(chatId: string, messageId?: string): void {
+    const msgId = messageId ?? this.lastIncomingMessageId.get(chatId);
+    if (!msgId || !this.restClient) return;
 
     // Fire-and-forget — typing indicator is non-critical
     this.restClient.im.messageReaction.create({
-      path: { message_id: messageId },
+      path: { message_id: msgId },
       data: { reaction_type: { emoji_type: TYPING_EMOJI } },
     }).then((res) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const reactionId = (res as any)?.data?.reaction_id;
       if (reactionId) {
-        this.typingReactions.set(chatId, reactionId);
+        this.typingReactions.set(msgId, reactionId);
       }
     }).catch((err) => {
       // Non-critical — don't log rate limit errors
@@ -235,17 +249,119 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Remove the "Typing" emoji reaction from the user's message.
    * Called by bridge-manager via onMessageEnd().
    */
-  onMessageEnd(chatId: string): void {
-    const reactionId = this.typingReactions.get(chatId);
-    const messageId = this.lastIncomingMessageId.get(chatId);
-    if (!reactionId || !messageId || !this.restClient) return;
+  onMessageEnd(chatId: string, messageId?: string): void {
+    const msgId = messageId ?? this.lastIncomingMessageId.get(chatId);
+    if (!msgId || !this.restClient) return;
 
-    this.typingReactions.delete(chatId);
+    const reactionId = this.typingReactions.get(msgId);
+    if (!reactionId) return;
+
+    this.typingReactions.delete(msgId);
 
     // Fire-and-forget — failure is fine (reaction may already be gone)
     this.restClient.im.messageReaction.delete({
-      path: { message_id: messageId, reaction_id: reactionId },
+      path: { message_id: msgId, reaction_id: reactionId },
     }).catch(() => { /* ignore */ });
+  }
+
+  // ── Streaming preview ──────────────────────────────────────
+
+  getPreviewCapabilities(chatId: string): PreviewCapabilities | null {
+    // Global kill switch
+    if (this.setting('stream_enabled') === 'false') return null;
+
+    // Already degraded for this chat
+    if (this.previewDegraded.has(chatId)) return null;
+
+    return { supported: true, privateOnly: false };
+  }
+
+  async sendPreview(chatId: string, text: string, _draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
+    if (!this.restClient) return 'skip';
+
+    // Apply the same markdown preprocessing used for final messages
+    const processed = preprocessFeishuMarkdown(text);
+
+    // Build card JSON with update_multi enabled for PATCH support
+    const cardJson = JSON.stringify({
+      schema: '2.0',
+      config: { wide_screen_mode: true, update_multi: true },
+      body: {
+        elements: [
+          { tag: 'markdown', content: processed },
+        ],
+      },
+    });
+
+    const existingMsgId = this.previewMessages.get(chatId);
+
+    try {
+      if (existingMsgId) {
+        // Update existing preview card via PATCH
+        await this.restClient.im.message.patch({
+          path: { message_id: existingMsgId },
+          data: { content: cardJson },
+        });
+        return 'sent';
+      } else {
+        // Guard: if a create is already in-flight, queue the update
+        if (this.previewCreating.has(chatId)) {
+          this.previewQueuedUpdate.set(chatId, cardJson);
+          return 'sent';  // optimistic — queued PATCH will apply after create resolves
+        }
+
+        // Send new preview card
+        this.previewCreating.add(chatId);
+        try {
+          const res = await this.restClient.im.message.create({
+            params: { receive_id_type: 'chat_id' },
+            data: {
+              receive_id: chatId,
+              msg_type: 'interactive',
+              content: cardJson,
+            },
+          });
+          if (res?.data?.message_id) {
+            this.previewMessages.set(chatId, res.data.message_id);
+            // Apply any queued update that arrived while create was in-flight
+            const queued = this.previewQueuedUpdate.get(chatId);
+            if (queued) {
+              this.previewQueuedUpdate.delete(chatId);
+              try {
+                await this.restClient.im.message.patch({
+                  path: { message_id: res.data.message_id },
+                  data: { content: queued },
+                });
+              } catch { /* best effort — card at least has the initial content */ }
+            }
+            return 'sent';
+          }
+          return 'skip';
+        } finally {
+          this.previewCreating.delete(chatId);
+          this.previewQueuedUpdate.delete(chatId);
+        }
+      }
+    } catch (err) {
+      console.warn('[feishu-adapter] sendPreview error:', err instanceof Error ? err.message : err);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const code = (err as any)?.code;
+      // Permanent failures: degrade
+      if (code === 230001 || code === 230002) {
+        this.previewDegraded.add(chatId);
+        return 'degrade';
+      }
+      // Transient (rate limit, network) — skip this update
+      return 'skip';
+    }
+  }
+
+  endPreview(chatId: string, _draftId: number): void {
+    // Keep the preview card as the final message — bridge-manager skips
+    // deliverResponse when preview was active, so this card IS the response.
+    this.previewMessages.delete(chatId);
+    this.previewCreating.delete(chatId);
+    // Don't clear previewQueuedUpdate — in-flight create needs it to PATCH final content
   }
 
   // ── Send ────────────────────────────────────────────────────
@@ -267,9 +383,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       text = preprocessFeishuMarkdown(text);
     }
 
-    // If there are inline buttons (permission prompts), send card with action buttons
+    // If there are inline buttons, route to appropriate card type
     if (message.inlineButtons && message.inlineButtons.length > 0) {
-      return this.sendPermissionCard(message.address.chatId, text, message.inlineButtons);
+      if (message.questionMeta) {
+        return this.sendQuestionCard(message.address.chatId, text, message.inlineButtons, message.questionMeta);
+      }
+      return this.sendPermissionCard(message.address.chatId, text, message.inlineButtons, message.permissionMeta);
     }
 
     // Rendering strategy (aligned with Openclaw):
@@ -299,6 +418,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       });
 
       if (res?.data?.message_id) {
+        console.log(`[feishu-adapter] Sent card to ${chatId}, msgId: ${res.data.message_id}`);
         return { ok: true, messageId: res.data.message_id };
       }
       console.warn('[feishu-adapter] Card send failed:', res?.msg, res?.code);
@@ -328,6 +448,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       });
 
       if (res?.data?.message_id) {
+        console.log(`[feishu-adapter] Sent post to ${chatId}, msgId: ${res.data.message_id}`);
         return { ok: true, messageId: res.data.message_id };
       }
       console.warn('[feishu-adapter] Post send failed:', res?.msg, res?.code);
@@ -364,10 +485,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * well-formatted card with /perm text commands instead of clickable buttons.
    * The user replies with the /perm command to approve/deny.
    */
-  private async sendPermissionCard(
+  protected async sendPermissionCard(
     chatId: string,
     text: string,
     inlineButtons: import('../types.js').InlineButton[][],
+    _permissionMeta?: import('../types.js').PermissionCardMeta,
   ): Promise<SendResult> {
     if (!this.restClient) {
       return { ok: false, error: 'Feishu client not initialized' };
@@ -452,23 +574,102 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
+  // ── Question card (AskUserQuestion) ─────────────────────────
+
+  /**
+   * Send an AskUserQuestion card. Feishu WS mode cannot handle card callbacks,
+   * so we render the question as formatted text with /perm commands as fallback.
+   */
+  protected async sendQuestionCard(
+    chatId: string,
+    _text: string,
+    inlineButtons: import('../types.js').InlineButton[][],
+    questionMeta: import('../types.js').QuestionCardMeta,
+  ): Promise<SendResult> {
+    if (!this.restClient) {
+      return { ok: false, error: 'Feishu client not initialized' };
+    }
+
+    const q = questionMeta.questions[0];
+    const permId = questionMeta.permissionRequestId;
+
+    // Build card content with question and options
+    const lines: string[] = [];
+    lines.push(`**${q.question}**`);
+    lines.push('');
+    for (const opt of q.options) {
+      lines.push(`• **${opt.label}** — ${opt.description}`);
+    }
+    lines.push('');
+    lines.push('---');
+
+    // Check if buttons are askq (native options) or perm (fallback)
+    const hasAskqButtons = inlineButtons.flat().some(btn => btn.callbackData.startsWith('askq:'));
+    if (hasAskqButtons) {
+      // Feishu can't handle askq callbacks, fall back to /perm allow
+      lines.push('**Reply with:** `/perm allow ' + permId + '`');
+    } else {
+      // Already using perm buttons
+      const cmds = inlineButtons.flat().map(btn => {
+        const parts = btn.callbackData.split(':');
+        return '`/perm ' + parts[1] + ' ' + parts.slice(2).join(':') + '`';
+      });
+      lines.push('**Reply with:**');
+      lines.push(...cmds);
+    }
+
+    const cardJson = JSON.stringify({
+      schema: '2.0',
+      config: { wide_screen_mode: true },
+      header: {
+        template: 'blue',
+        title: { tag: 'plain_text', content: `❓ ${q.header}` },
+      },
+      body: {
+        elements: [
+          { tag: 'markdown', content: lines.join('\n') },
+        ],
+      },
+    });
+
+    try {
+      const res = await this.restClient.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: chatId,
+          msg_type: 'interactive',
+          content: cardJson,
+        },
+      });
+      if (res?.data?.message_id) {
+        return { ok: true, messageId: res.data.message_id };
+      }
+      console.warn('[feishu-adapter] Question card send failed:', res?.msg);
+    } catch (err) {
+      console.warn('[feishu-adapter] Question card error:', err instanceof Error ? err.message : err);
+    }
+
+    // Fallback: send as text
+    return this.sendPermissionCard(chatId, lines.join('\n'), inlineButtons);
+  }
+
   // ── Config & Auth ───────────────────────────────────────────
 
   validateConfig(): string | null {
-    const enabled = getBridgeContext().store.getSetting('bridge_feishu_enabled');
-    if (enabled !== 'true') return 'bridge_feishu_enabled is not true';
+    const enabled = this.setting('enabled');
+    if (enabled !== 'true') return `bridge_${this.channelType}_enabled is not true`;
 
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id');
-    if (!appId) return 'bridge_feishu_app_id not configured';
+    const appId = this.setting('app_id');
+    if (!appId) return `bridge_${this.channelType}_app_id not configured`;
 
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret');
-    if (!appSecret) return 'bridge_feishu_app_secret not configured';
+    const appSecret = this.setting('app_secret');
+    if (!appSecret) return `bridge_${this.channelType}_app_secret not configured`;
 
     return null;
   }
 
   isAuthorized(userId: string, chatId: string): boolean {
-    const allowedUsers = getBridgeContext().store.getSetting('bridge_feishu_allowed_users') || '';
+    const allowedUsers = this.setting('allowed_users');
     if (!allowedUsers) {
       // No restriction configured — allow all
       return true;
@@ -486,7 +687,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   // ── Incoming event handler ──────────────────────────────────
 
-  private async handleIncomingEvent(data: FeishuMessageEventData): Promise<void> {
+  protected async handleIncomingEvent(data: FeishuMessageEventData): Promise<void> {
     try {
       await this.processIncomingEvent(data);
     } catch (err) {
@@ -524,7 +725,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     // Group chat policy
     if (isGroup) {
-      const policy = getBridgeContext().store.getSetting('bridge_feishu_group_policy') || 'open';
+      const policy = this.setting('group_policy') || 'open';
 
       if (policy === 'disabled') {
         console.log('[feishu-adapter] Group message ignored (policy=disabled), chatId:', chatId);
@@ -532,7 +733,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
 
       if (policy === 'allowlist') {
-        const allowedGroups = (getBridgeContext().store.getSetting('bridge_feishu_group_allow_from') || '')
+        const allowedGroups = (this.setting('group_allow_from'))
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean);
@@ -543,12 +744,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
 
       // Require @mention check
-      const requireMention = getBridgeContext().store.getSetting('bridge_feishu_require_mention') !== 'false';
+      const requireMention = this.setting('require_mention') !== 'false';
       if (requireMention && !this.isBotMentioned(msg.mentions)) {
         console.log('[feishu-adapter] Group message ignored (bot not @mentioned), chatId:', chatId, 'msgId:', msg.message_id);
         try {
           getBridgeContext().store.insertAuditLog({
-            channelType: 'feishu',
+            channelType: this.channelType,
             chatId,
             direction: 'inbound',
             messageId: msg.message_id,
@@ -582,7 +783,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           text = '[image download failed]';
           try {
             getBridgeContext().store.insertAuditLog({
-              channelType: 'feishu',
+              channelType: this.channelType,
               chatId,
               direction: 'inbound',
               messageId: msg.message_id,
@@ -605,7 +806,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           text = `[${messageType} download failed]`;
           try {
             getBridgeContext().store.insertAuditLog({
-              channelType: 'feishu',
+              channelType: this.channelType,
               chatId,
               direction: 'inbound',
               messageId: msg.message_id,
@@ -638,7 +839,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     const timestamp = parseInt(msg.create_time, 10) || Date.now();
     const address = {
-      channelType: 'feishu' as const,
+      channelType: this.channelType,
       chatId,
       userId,
     };
@@ -673,13 +874,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
       attachments: attachments.length > 0 ? attachments : undefined,
     };
 
+    console.log(`[feishu-adapter] Received ${messageType} message from ${userId} in ${chatId}, msgId: ${msg.message_id}`);
     // Audit log
     try {
       const summary = attachments.length > 0
         ? `[${attachments.length} attachment(s)] ${text.slice(0, 150)}`
         : text.slice(0, 200);
       getBridgeContext().store.insertAuditLog({
-        channelType: 'feishu',
+        channelType: this.channelType,
         chatId,
         direction: 'inbound',
         messageId: msg.message_id,
@@ -760,7 +962,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Resolve bot identity via the Feishu REST API /bot/v3/info/.
    * Collects all available bot IDs for comprehensive mention matching.
    */
-  private async resolveBotIdentity(
+  protected async resolveBotIdentity(
     appId: string,
     appSecret: string,
     domain: lark.Domain,
@@ -887,6 +1089,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
         const tmpPath = path.join(os.tmpdir(), `feishu-dl-${crypto.randomUUID()}`);
         try {
           await res.writeFile(tmpPath);
+          const stat = fs.statSync(tmpPath);
+          if (stat.size > MAX_FILE_SIZE) {
+            console.warn(`[feishu-adapter] Resource too large (>${MAX_FILE_SIZE} bytes), key: ${fileKey}`);
+            return null;
+          }
           buffer = fs.readFileSync(tmpPath);
           if (buffer.length > MAX_FILE_SIZE) {
             console.warn(`[feishu-adapter] Resource too large (>${MAX_FILE_SIZE} bytes), key: ${fileKey}`);

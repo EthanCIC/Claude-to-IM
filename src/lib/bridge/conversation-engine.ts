@@ -157,12 +157,24 @@ export async function processMessage(
       }
     }
 
+    // Build system prompt: always use Claude Code preset + append channel context
+    const channelContext = [
+      `The user is communicating via ${binding.channelType} (IM platform).`,
+      `Responses are rendered as ${binding.channelType === 'telegram' ? 'HTML' : 'markdown'} in a chat app — keep formatting simple and responses concise.`,
+    ].join(' ');
+    const appendParts = [session?.system_prompt, channelContext].filter(Boolean);
+    const systemPrompt = {
+      type: 'preset' as const,
+      preset: 'claude_code' as const,
+      append: appendParts.join('\n\n'),
+    };
+
     const stream = llm.streamChat({
       prompt: text,
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,
       model: effectiveModel,
-      systemPrompt: session?.system_prompt || undefined,
+      systemPrompt,
       workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
       abortController,
       permissionMode,
