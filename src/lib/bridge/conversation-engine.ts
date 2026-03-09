@@ -39,6 +39,13 @@ export type OnPermissionRequest = (perm: PermissionRequestInfo) => Promise<void>
  */
 export type OnPartialText = (fullText: string) => void;
 
+/**
+ * Callback invoked when a `tool_use` SSE event arrives.
+ * Allows the bridge-manager to finalize the current preview segment
+ * so that text before and after tool invocations appear as separate cards.
+ */
+export type OnToolUse = (toolName: string) => void;
+
 export interface ConversationResult {
   responseText: string;
   tokenUsage: TokenUsage | null;
@@ -61,6 +68,7 @@ export async function processMessage(
   abortSignal?: AbortSignal,
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
+  onToolUse?: OnToolUse,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -189,7 +197,7 @@ export async function processMessage(
     // Consume the stream server-side (replicate collectStreamResponse pattern).
     // Permission requests are forwarded immediately via the callback during streaming
     // because the stream blocks until permission is resolved — we can't wait until after.
-    return await consumeStream(stream, sessionId, onPermissionRequest, onPartialText);
+    return await consumeStream(stream, sessionId, onPermissionRequest, onPartialText, onToolUse);
   } finally {
     clearInterval(renewalInterval);
     store.releaseSessionLock(sessionId, lockId);
@@ -206,6 +214,7 @@ async function consumeStream(
   sessionId: string,
   onPermissionRequest?: OnPermissionRequest,
   onPartialText?: OnPartialText,
+  onToolUse?: OnToolUse,
 ): Promise<ConversationResult> {
   const { store } = getBridgeContext();
   const reader = stream.getReader();
@@ -250,8 +259,10 @@ async function consumeStream(
               contentBlocks.push({ type: 'text', text: currentText });
               currentText = '';
             }
+            let toolName = '';
             try {
               const toolData = JSON.parse(event.data);
+              toolName = toolData.name;
               contentBlocks.push({
                 type: 'tool_use',
                 id: toolData.id,
@@ -259,6 +270,9 @@ async function consumeStream(
                 input: toolData.input,
               });
             } catch { /* skip */ }
+            if (onToolUse && toolName) {
+              try { onToolUse(toolName); } catch { /* non-critical */ }
+            }
             break;
           }
 

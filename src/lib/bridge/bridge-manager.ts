@@ -84,6 +84,35 @@ function flushPreview(
   });
 }
 
+/**
+ * Finalize the current streaming preview segment: flush pending text,
+ * end the preview card, and reset state for the next segment.
+ * Used when a tool_use or permission_request splits the response.
+ */
+function finalizePreviewSegment(
+  adapter: BaseChannelAdapter,
+  ps: StreamingPreviewState,
+  cfg: StreamConfig,
+  chatId: string,
+): void {
+  if (ps.degraded) return;
+  if (ps.throttleTimer) {
+    clearTimeout(ps.throttleTimer);
+    ps.throttleTimer = null;
+  }
+  if (ps.pendingText && ps.pendingText !== ps.lastSentText) {
+    flushPreview(adapter, ps, cfg);
+  }
+  if (ps.lastSentAt > 0) {
+    adapter.endPreview?.(chatId, ps.draftId);
+  }
+  ps.textOffset += ps.pendingText.length;
+  ps.draftId = generateDraftId();
+  ps.lastSentText = '';
+  ps.lastSentAt = 0;
+  ps.pendingText = '';
+}
+
 // ── Channel-aware rendering dispatch ──────────────────────────
 
 import type { ChannelAddress, SendResult } from './types.js';
@@ -296,6 +325,9 @@ export async function stop(): Promise<void> {
   state.adapters.clear();
   state.adapterMeta.clear();
   state.startedAt = null;
+
+  // Clear all pending permission expiry timers
+  broker.clearAllPermissionTimers();
 
   // Notify host that bridge stopped
   lifecycle.onBridgeStop?.();
@@ -593,26 +625,8 @@ async function handleMessage(
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
       // ── Finalize current preview segment before permission card ──
-      if (previewState && streamCfg && !previewState.degraded && previewState.lastSentAt > 0) {
-        // Cancel pending throttle timer
-        if (previewState.throttleTimer) {
-          clearTimeout(previewState.throttleTimer);
-          previewState.throttleTimer = null;
-        }
-        // Final flush of buffered text
-        if (previewState.pendingText !== previewState.lastSentText) {
-          flushPreview(adapter, previewState, streamCfg);
-        }
-        // End the current preview card (keeps it as a finalized message)
-        adapter.endPreview?.(msg.address.chatId, previewState.draftId);
-
-        // Reset for next segment
-        previewState.textOffset += previewState.pendingText.length;
-        previewState.draftId = generateDraftId();
-        previewState.lastSentText = '';
-        previewState.lastSentAt = 0;
-        previewState.pendingText = '';
-        // Note: don't reset degraded — if degraded, stay degraded
+      if (previewState && streamCfg) {
+        finalizePreviewSegment(adapter, previewState, streamCfg, msg.address.chatId);
       }
 
       // Forward permission request to IM
@@ -626,7 +640,14 @@ async function handleMessage(
         perm.suggestions,
         msg.messageId,
       );
-    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText);
+    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText,
+    // onToolUse: split preview at tool boundaries
+    (previewState && streamCfg) ? (_toolName: string) => {
+      if (!previewState || previewState.degraded) return;
+      if (previewState.lastSentAt > 0 || previewState.pendingText.length > 0) {
+        finalizePreviewSegment(adapter, previewState, streamCfg!, msg.address.chatId);
+      }
+    } : undefined);
 
     // Send response text — render via channel-appropriate format.
     // If streaming preview was active and not degraded, the preview card already
