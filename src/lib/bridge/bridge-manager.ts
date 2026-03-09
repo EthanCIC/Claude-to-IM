@@ -69,6 +69,11 @@ function drainObserveBuffer(chatId: string): string | null {
   return context;
 }
 
+function hasObserveBuffer(chatId: string): boolean {
+  const buf = observeBuffers.get(chatId);
+  return !!buf && buf.length > 0;
+}
+
 // ── Streaming preview helpers ──────────────────────────────────
 
 /** Generate a non-zero random 31-bit integer for use as draft_id. */
@@ -556,17 +561,19 @@ async function handleMessage(
 
   // Handle image-only download failures — surface error to user instead of silently dropping
   if (!rawText && !hasAttachments) {
-    const rawData = msg.raw as { imageDownloadFailed?: boolean; failedCount?: number } | undefined;
-    if (rawData?.imageDownloadFailed) {
-      await deliver(adapter, {
-        address: msg.address,
-        text: `Failed to download ${rawData.failedCount ?? 1} image(s). Please try sending again.`,
-        parseMode: 'plain',
-        replyToMessageId: msg.messageId,
-      });
+    if (!hasObserveBuffer(msg.address.chatId)) {
+      const rawData = msg.raw as { imageDownloadFailed?: boolean; failedCount?: number } | undefined;
+      if (rawData?.imageDownloadFailed) {
+        await deliver(adapter, {
+          address: msg.address,
+          text: `Failed to download ${rawData.failedCount ?? 1} image(s). Please try sending again.`,
+          parseMode: 'plain',
+          replyToMessageId: msg.messageId,
+        });
+      }
+      ack();
+      return;
     }
-    ack();
-    return;
   }
 
   // Check for IM commands (before sanitization — commands are validated individually)
@@ -589,7 +596,7 @@ async function handleMessage(
     });
   }
 
-  if (!text && !hasAttachments) { ack(); return; }
+  if (!text && !hasAttachments && !hasObserveBuffer(msg.address.chatId)) { ack(); return; }
 
   // Regular message — route to conversation engine
   const binding = router.resolve(msg.address);

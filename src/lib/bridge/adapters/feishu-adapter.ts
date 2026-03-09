@@ -931,7 +931,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Strip @mention markers from text
     text = this.stripMentionMarkers(text);
 
-    if (!text.trim() && attachments.length === 0) return;
+    if (!text.trim() && attachments.length === 0 && !isGroup) return;
 
     const timestamp = parseInt(msg.create_time, 10) || Date.now();
 
