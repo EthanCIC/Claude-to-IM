@@ -820,6 +820,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
 
+    let observeOnly = false;
+
     // Group chat policy
     if (isGroup) {
       const policy = this.setting('group_policy') || 'open';
@@ -840,25 +842,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
         }
       }
 
-      // Require @mention check
+      // Require @mention check — if not mentioned, observe only (store context, no LLM reply)
       const requireMention = this.setting('require_mention') !== 'false';
       if (requireMention && !this.isBotMentioned(msg.mentions)) {
-        console.log('[feishu-adapter] Group message ignored (bot not @mentioned), chatId:', chatId, 'msgId:', msg.message_id);
-        try {
-          getBridgeContext().store.insertAuditLog({
-            channelType: this.channelType,
-            chatId,
-            direction: 'inbound',
-            messageId: msg.message_id,
-            summary: '[FILTERED] Group message dropped: bot not @mentioned (require_mention=true)',
-          });
-        } catch { /* best effort */ }
-        return;
+        observeOnly = true;
       }
     }
 
     // Track last message ID per chat for typing indicator
-    this.lastIncomingMessageId.set(chatId, msg.message_id);
+    if (!observeOnly) {
+      this.lastIncomingMessageId.set(chatId, msg.message_id);
+    }
 
     // Extract content based on message type
     const messageType = msg.message_type;
@@ -867,6 +861,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     if (messageType === 'text') {
       text = this.parseTextContent(msg.content);
+    } else if (observeOnly) {
+      // For observe-only messages, skip file downloads — just record the type
+      text = `[${messageType}]`;
     } else if (messageType === 'image') {
       // [P1] Download image with failure fallback
       console.log('[feishu-adapter] Image message received, content:', msg.content);
@@ -983,10 +980,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       text: text.trim(),
       timestamp,
       attachments: attachments.length > 0 ? attachments : undefined,
+      ...(observeOnly ? { observeOnly } : {}),
     };
 
     const senderLabel = displayName ? `${displayName} (${userId})` : userId;
-    console.log(`[feishu-adapter] Received ${messageType} from ${senderLabel} in ${chatId}`);
+    const modeLabel = observeOnly ? ' (observe)' : '';
+    console.log(`[feishu-adapter] Received ${messageType} from ${senderLabel} in ${chatId}${modeLabel}`);
     // Audit log
     try {
       const summary = attachments.length > 0

@@ -30,6 +30,45 @@ import {
 
 const GLOBAL_KEY = '__bridge_manager__';
 
+// ── Observe mode (group chat context buffer) ──────────────────
+
+/** Max observe messages to buffer per chat before oldest are dropped. */
+const OBSERVE_BUFFER_MAX = 50;
+
+/** Per-chat buffer of observe-only messages (group chats without @mention). */
+const observeBuffers = new Map<string, string[]>();
+
+/**
+ * Add an observe-only message to the per-chat buffer.
+ * Format: "[Name] text" or "[userId] text" if no display name.
+ */
+function bufferObserveMessage(chatId: string, displayName: string | undefined, userId: string | undefined, text: string): void {
+  const label = displayName || userId || 'unknown';
+  const line = `[${label}] ${text}`;
+  let buf = observeBuffers.get(chatId);
+  if (!buf) {
+    buf = [];
+    observeBuffers.set(chatId, buf);
+  }
+  buf.push(line);
+  // Ring buffer: drop oldest when full
+  if (buf.length > OBSERVE_BUFFER_MAX) {
+    buf.splice(0, buf.length - OBSERVE_BUFFER_MAX);
+  }
+}
+
+/**
+ * Drain and return all buffered observe messages for a chat.
+ * Returns null if buffer is empty.
+ */
+function drainObserveBuffer(chatId: string): string | null {
+  const buf = observeBuffers.get(chatId);
+  if (!buf || buf.length === 0) return null;
+  const context = buf.join('\n');
+  observeBuffers.delete(chatId);
+  return context;
+}
+
 // ── Streaming preview helpers ──────────────────────────────────
 
 /** Generate a non-zero random 31-bit integer for use as draft_id. */
@@ -329,6 +368,9 @@ export async function stop(): Promise<void> {
   // Clear all pending permission expiry timers
   broker.clearAllPermissionTimers();
 
+  // Clear observe buffers (in-memory, no need to persist)
+  observeBuffers.clear();
+
   // Notify host that bridge stopped
   lifecycle.onBridgeStop?.();
 
@@ -400,10 +442,11 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
         const msg = await adapter.consumeOne();
         if (!msg) continue; // Adapter stopped
 
-        // Callback queries, commands, and pending text answers are lightweight
-        // — process inline (bypass session lock). Text answers for "Other"
-        // MUST bypass the lock because the lock holder is waiting for this answer.
-        if (msg.callbackData || msg.text.trim().startsWith('/')
+        // Callback queries, commands, observe-only, and pending text answers
+        // are lightweight — process inline (bypass session lock).
+        // Text answers for "Other" MUST bypass the lock because the lock
+        // holder is waiting for this answer.
+        if (msg.observeOnly || msg.callbackData || msg.text.trim().startsWith('/')
             || broker.hasPendingTextAnswer(msg.address.chatId)) {
           await handleMessage(adapter, msg);
         } else {
@@ -482,6 +525,13 @@ async function handleMessage(
       };
       await deliver(adapter, confirmMsg);
     }
+    ack();
+    return;
+  }
+
+  // Observe-only messages: buffer for context, don't trigger LLM
+  if (msg.observeOnly) {
+    bufferObserveMessage(msg.address.chatId, msg.address.displayName, msg.address.userId, msg.text.trim());
     ack();
     return;
   }
@@ -622,10 +672,18 @@ async function handleMessage(
     // during streaming (the stream blocks until permission is resolved).
     // Use text or empty string for image-only messages (prompt is still required by streamClaude)
     const rawPrompt = text || (hasAttachments ? 'Describe this image.' : '');
+
+    // Prepend buffered observe-only messages as group chat context
+    const observeContext = drainObserveBuffer(msg.address.chatId);
+    const contextPrefix = observeContext
+      ? `[Recent group messages]\n${observeContext}\n\n`
+      : '';
+
     // Prefix the prompt with sender identity so the LLM always knows who is speaking
-    const promptText = msg.address.displayName
-      ? `[Message from: ${msg.address.displayName}]\n${rawPrompt}`
-      : rawPrompt;
+    const senderPrefix = msg.address.displayName
+      ? `[Message from: ${msg.address.displayName}]\n`
+      : '';
+    const promptText = `${contextPrefix}${senderPrefix}${rawPrompt}`;
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
       // ── Finalize current preview segment before permission card ──

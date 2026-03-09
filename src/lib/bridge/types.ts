@@ -55,6 +55,8 @@ export interface InboundMessage {
   updateId?: number;
   /** File attachments (images, documents) from the IM channel */
   attachments?: import('./host.js').FileAttachment[];
+  /** Observe-only: store in context buffer but don't trigger LLM response (group chat without @mention) */
+  observeOnly?: boolean;
 }
 
 /** Outbound message to send to an IM channel */
