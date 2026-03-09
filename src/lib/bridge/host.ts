@@ -95,6 +95,10 @@ export interface AuditLogInput {
   direction: 'inbound' | 'outbound';
   messageId: string;
   summary: string;
+  /** Sender identity (for inbound messages). */
+  userId?: string;
+  /** Human-readable sender name (for inbound messages). */
+  senderName?: string;
 }
 
 /** Input for inserting a permission link. */

@@ -621,7 +621,11 @@ async function handleMessage(
     // Pass permission callback so requests are forwarded to IM immediately
     // during streaming (the stream blocks until permission is resolved).
     // Use text or empty string for image-only messages (prompt is still required by streamClaude)
-    const promptText = text || (hasAttachments ? 'Describe this image.' : '');
+    const rawPrompt = text || (hasAttachments ? 'Describe this image.' : '');
+    // Prefix the prompt with sender identity so the LLM always knows who is speaking
+    const promptText = msg.address.displayName
+      ? `[Message from: ${msg.address.displayName}]\n${rawPrompt}`
+      : rawPrompt;
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
       // ── Finalize current preview segment before permission card ──

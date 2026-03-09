@@ -24,6 +24,7 @@ export interface ChannelAddress {
   chatId: string;        // Platform-specific chat/channel identifier
   userId?: string;       // Platform-specific user identifier (optional for group chats)
   displayName?: string;  // Human-readable name for audit logs
+  isGroup?: boolean;     // Whether this is a group/channel chat
 }
 
 /** Composite key for routing: channelType + chatId */
@@ -156,6 +157,10 @@ export interface AuditLogEntry {
   direction: 'inbound' | 'outbound';
   messageId: string;
   summary: string;
+  /** Sender identity (for inbound messages). */
+  userId?: string;
+  /** Human-readable sender name (for inbound messages). */
+  senderName?: string;
   createdAt: string;
 }
 

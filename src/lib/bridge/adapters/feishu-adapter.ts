@@ -117,6 +117,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private botIds = new Set<string>();
   /** Track last incoming message ID per chat (fallback for typing indicator). */
   private lastIncomingMessageId = new Map<string, string>();
+  /** Cache: open_id → display name (resolved via Contact API). */
+  private userNameCache = new Map<string, string>();
+  /** Disable Contact API calls after first failure (missing scopes). */
+  private contactApiDisabled = false;
   /** Track active typing reaction IDs per message for cleanup. */
   private typingReactions = new Map<string, string>();
   /** Track preview message IDs per chat for streaming updates. */
@@ -212,12 +216,69 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.previewDegraded.clear();
     this.previewQueuedUpdate.clear();
     this.previewGeneration.clear();
+    this.userNameCache.clear();
+    this.contactApiDisabled = false;
 
     console.log('[feishu-adapter] Stopped');
   }
 
   isRunning(): boolean {
     return this.running;
+  }
+
+  // ── Sender Identity ────────────────────────────────────────
+
+  /**
+   * Resolve a user's display name via the Contact API.
+   * Returns cached value if available; returns null if API is disabled or fails.
+   * Requires `contact:contact.base:readonly` scope on the Feishu app.
+   */
+  private async resolveUserDisplayName(userId: string): Promise<string | null> {
+    if (!userId || this.contactApiDisabled || !this.restClient) return null;
+
+    const cached = this.userNameCache.get(userId);
+    if (cached) return cached;
+
+    try {
+      const resp = await this.restClient.contact.user.get({
+        path: { user_id: userId },
+        params: { user_id_type: 'open_id' },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const name = (resp as any)?.data?.user?.name;
+      if (name) {
+        this.userNameCache.set(userId, name);
+        return name;
+      }
+      return null;
+    } catch (err) {
+      // If the first call fails (likely missing scope), disable further attempts
+      // to avoid spamming the API with 403s on every message.
+      console.warn(
+        '[feishu-adapter] Contact API failed for userId:', userId,
+        '— disabling sender name resolution.',
+        err instanceof Error ? err.message : err,
+      );
+      this.contactApiDisabled = true;
+      return null;
+    }
+  }
+
+  /**
+   * Extract display name from message mentions array (fallback when Contact API unavailable).
+   * Lark includes the sender's name in mentions if they @mention the bot.
+   */
+  private extractSenderNameFromMentions(
+    mentions: FeishuMessageEventData['message']['mentions'],
+    userId: string,
+  ): string | null {
+    if (!mentions) return null;
+    for (const m of mentions) {
+      if (m.id.open_id === userId || m.id.user_id === userId || m.id.union_id === userId) {
+        return m.name || null;
+      }
+    }
+    return null;
   }
 
   // ── Queue ───────────────────────────────────────────────────
@@ -876,10 +937,22 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!text.trim() && attachments.length === 0) return;
 
     const timestamp = parseInt(msg.create_time, 10) || Date.now();
+
+    // Resolve sender display name (for audit trail, memory, and group chat identity)
+    let displayName: string | undefined;
+    if (userId) {
+      const name = await this.resolveUserDisplayName(userId)
+        || this.extractSenderNameFromMentions(msg.mentions, userId)
+        || undefined;
+      if (name) displayName = name;
+    }
+
     const address = {
       channelType: this.channelType,
       chatId,
       userId,
+      ...(displayName ? { displayName } : {}),
+      ...(isGroup ? { isGroup } : {}),
     };
 
     // [P1] Check for /perm text command (permission approval fallback)
@@ -912,7 +985,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
       attachments: attachments.length > 0 ? attachments : undefined,
     };
 
-    console.log(`[feishu-adapter] Received ${messageType} message from ${userId} in ${chatId}, msgId: ${msg.message_id}`);
+    const senderLabel = displayName ? `${displayName} (${userId})` : userId;
+    console.log(`[feishu-adapter] Received ${messageType} from ${senderLabel} in ${chatId}`);
     // Audit log
     try {
       const summary = attachments.length > 0
@@ -924,6 +998,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
         direction: 'inbound',
         messageId: msg.message_id,
         summary,
+        userId,
+        senderName: displayName,
       });
     } catch { /* best effort */ }
 
