@@ -104,6 +104,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private previewDegraded = new Set<string>();
   /** Queued card content to PATCH after in-flight create resolves. */
   private previewQueuedUpdate = new Map<string, string>();
+  /** Generation counter per chat — incremented by endPreview to invalidate in-flight creates. */
+  private previewGeneration = new Map<string, number>();
 
   protected setting(key: string): string {
     return getBridgeContext().store.getSetting(`bridge_${this.channelType}_${key}`) || '';
@@ -186,6 +188,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.previewCreating.clear();
     this.previewDegraded.clear();
     this.previewQueuedUpdate.clear();
+    this.previewGeneration.clear();
 
     console.log('[feishu-adapter] Stopped');
   }
@@ -312,6 +315,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
         // Send new preview card
         this.previewCreating.add(chatId);
+        const genBefore = this.previewGeneration.get(chatId) || 0;
         try {
           const res = await this.restClient.im.message.create({
             params: { receive_id_type: 'chat_id' },
@@ -322,8 +326,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
             },
           });
           if (res?.data?.message_id) {
-            this.previewMessages.set(chatId, res.data.message_id);
-            // Apply any queued update that arrived while create was in-flight
+            // Only adopt this card for future updates if endPreview hasn't been
+            // called during the create. If generation changed, the card belongs to
+            // a finalized segment — don't track it for future PATCHes.
+            const genAfter = this.previewGeneration.get(chatId) || 0;
+            if (genAfter === genBefore) {
+              this.previewMessages.set(chatId, res.data.message_id);
+            }
+            // Always apply queued update so the card shows final content,
+            // even if endPreview was called (the card still needs its complete text).
             const queued = this.previewQueuedUpdate.get(chatId);
             if (queued) {
               this.previewQueuedUpdate.delete(chatId);
@@ -361,6 +372,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // deliverResponse when preview was active, so this card IS the response.
     this.previewMessages.delete(chatId);
     this.previewCreating.delete(chatId);
+    // Increment generation so in-flight creates don't re-adopt stale card IDs
+    this.previewGeneration.set(chatId, (this.previewGeneration.get(chatId) || 0) + 1);
     // Don't clear previewQueuedUpdate — in-flight create needs it to PATCH final content
   }
 
