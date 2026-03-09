@@ -101,6 +101,7 @@ export async function processMessage(
     // Save user message — persist file attachments to disk using the same
     // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
     let savedContent = text;
+    let persistedFilePaths: Array<{ name: string; type: string; size: number; filePath: string }> = [];
     if (files && files.length > 0) {
       const workDir = binding.workingDirectory || session?.working_directory || '';
       if (workDir) {
@@ -116,16 +117,28 @@ export async function processMessage(
             fs.writeFileSync(filePath, buffer);
             return { id: f.id, name: f.name, type: f.type, size: buffer.length, filePath };
           });
+          persistedFilePaths = fileMeta;
           savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${text}`;
         } catch (err) {
           console.warn('[conversation-engine] Failed to persist file attachments:', err instanceof Error ? err.message : err);
-          savedContent = `[${files.length} image(s) attached] ${text}`;
+          savedContent = `[${files.length} file(s) attached] ${text}`;
         }
       } else {
-        savedContent = `[${files.length} image(s) attached] ${text}`;
+        savedContent = `[${files.length} file(s) attached] ${text}`;
       }
     }
     store.addMessage(sessionId, 'user', savedContent);
+
+    // Separate image files (sent as multi-modal content blocks) from non-image
+    // files (persisted to disk, referenced by path so Claude can Read them).
+    const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
+    let promptText = text;
+    const imageOnlyFiles = files?.filter(f => IMAGE_TYPES.has(f.type));
+    const nonImagePaths = persistedFilePaths.filter(f => !IMAGE_TYPES.has(f.type));
+    if (nonImagePaths.length > 0) {
+      const fileList = nonImagePaths.map(f => `- ${f.filePath} (${f.name}, ${f.size} bytes)`).join('\n');
+      promptText = `[Files attached — use the Read tool to access them:\n${fileList}]\n\n${text}`;
+    }
 
     // Resolve provider
     let resolvedProvider: import('./host.js').BridgeApiProvider | undefined;
@@ -178,7 +191,7 @@ export async function processMessage(
     };
 
     const stream = llm.streamChat({
-      prompt: text,
+      prompt: promptText,
       sessionId,
       sdkSessionId: binding.sdkSessionId || undefined,
       model: effectiveModel,
@@ -188,7 +201,7 @@ export async function processMessage(
       permissionMode,
       provider: resolvedProvider,
       conversationHistory: historyMsgs,
-      files,
+      files: imageOnlyFiles,
       onRuntimeStatusChange: (status: string) => {
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },

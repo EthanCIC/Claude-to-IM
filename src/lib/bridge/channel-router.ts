@@ -53,13 +53,22 @@ export function createBinding(
     store.updateSessionProviderId(session.id, defaultProviderId);
   }
 
-  return store.upsertChannelBinding({
+  const binding = store.upsertChannelBinding({
     channelType: address.channelType,
     chatId: address.chatId,
     codepilotSessionId: session.id,
     workingDirectory: defaultCwd,
     model: defaultModel,
   });
+
+  // Clear stale sdkSessionId so the SDK starts a fresh conversation
+  // instead of resuming the old one (upsert preserves existing fields).
+  if (binding.sdkSessionId) {
+    store.updateChannelBinding(binding.id, { sdkSessionId: '' });
+    binding.sdkSessionId = '';
+  }
+
+  return binding;
 }
 
 /**

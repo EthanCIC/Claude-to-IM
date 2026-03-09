@@ -106,6 +106,7 @@ export interface PermissionLinkInput {
   toolName: string;
   toolInput?: Record<string, unknown>;
   suggestions: string;
+  createdAt: number;
 }
 
 /** Stored permission link record. */
@@ -117,6 +118,7 @@ export interface PermissionLinkRecord {
   toolName: string;
   toolInput?: Record<string, unknown>;
   suggestions: string;
+  createdAt: number;
 }
 
 /** Input for inserting an outbound reference. */

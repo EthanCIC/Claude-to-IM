@@ -77,6 +77,29 @@ const MIME_BY_TYPE: Record<string, string> = {
   file: 'application/octet-stream',
   audio: 'audio/ogg',
   video: 'video/mp4',
+};
+
+/** MIME type by file extension (common types for file attachments). */
+const MIME_BY_EXT: Record<string, string> = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  json: 'application/json',
+  md: 'text/markdown',
+  zip: 'application/zip',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  mp4: 'video/mp4',
+  ogg: 'audio/ogg',
   media: 'application/octet-stream',
 };
 
@@ -812,7 +835,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
         const resourceType = messageType === 'audio' || messageType === 'video' || messageType === 'media'
           ? messageType
           : 'file';
-        const attachment = await this.downloadResource(msg.message_id, fileKey, resourceType);
+        let fileName: string | undefined;
+        try { fileName = JSON.parse(msg.content).file_name; } catch { /* ignore */ }
+        const attachment = await this.downloadResource(msg.message_id, fileKey, resourceType, fileName);
         if (attachment) {
           attachments.push(attachment);
         } else {
@@ -1052,6 +1077,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     messageId: string,
     fileKey: string,
     resourceType: string,
+    fileName?: string,
   ): Promise<FileAttachment | null> {
     if (!this.restClient) return null;
 
@@ -1124,17 +1150,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
       const base64 = buffer.toString('base64');
       const id = crypto.randomUUID();
-      const mimeType = MIME_BY_TYPE[resourceType] || 'application/octet-stream';
-      const ext = resourceType === 'image' ? 'png'
+      const fallbackExt = resourceType === 'image' ? 'png'
         : resourceType === 'audio' ? 'ogg'
         : resourceType === 'video' ? 'mp4'
         : 'bin';
+      const resolvedName = fileName || `${fileKey}.${fallbackExt}`;
+      const extFromName = resolvedName.includes('.') ? resolvedName.split('.').pop()! : fallbackExt;
+      const mimeType = MIME_BY_EXT[extFromName] || MIME_BY_TYPE[resourceType] || 'application/octet-stream';
 
       console.log(`[feishu-adapter] Resource downloaded: ${buffer.length} bytes, key=${fileKey}`);
 
       return {
         id,
-        name: `${fileKey}.${ext}`,
+        name: resolvedName,
         type: mimeType,
         size: buffer.length,
         data: base64,

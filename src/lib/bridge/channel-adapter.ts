@@ -96,6 +96,13 @@ export abstract class BaseChannelAdapter {
    * normal delivery path, so this is typically a no-op.
    */
   endPreview?(_chatId: string, _draftId: number): void;
+
+  /**
+   * Update a permission card to show it has expired (timeout).
+   * Called by the permission broker when the SDK-side permission times out.
+   * Not all platforms support this — default is a no-op.
+   */
+  expirePermissionCard?(_chatId: string, _messageId: string, _toolName?: string): Promise<void>;
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

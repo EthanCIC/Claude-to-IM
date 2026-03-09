@@ -167,6 +167,18 @@ export class LarkAdapter extends FeishuAdapter {
       const callbackData = action.value.callback_data;
       if (!callbackData) return {};
 
+      // Passive expiry check: if the permission link is already resolved/expired,
+      // return an expired card immediately without enqueuing
+      if (callbackData.startsWith('perm:') || callbackData.startsWith('askq:') || callbackData.startsWith('askq_other:')) {
+        const permId = this.extractPermIdFromCallback(callbackData);
+        if (permId) {
+          const link = getBridgeContext().store.getPermissionLink(permId);
+          if (link?.resolved) {
+            return this.buildExpiredCard(link.toolName);
+          }
+        }
+      }
+
       const context = event?.context || {};
       const chatId = context.open_chat_id || '';
       const userId = event?.operator?.open_id || '';
@@ -205,6 +217,27 @@ export class LarkAdapter extends FeishuAdapter {
       console.error('[lark-adapter] Card action error:', err instanceof Error ? err.message : err);
       return {};
     }
+  }
+
+  /**
+   * Extract permission ID from various callback data formats.
+   */
+  private extractPermIdFromCallback(callbackData: string): string | null {
+    if (callbackData.startsWith('perm:')) {
+      // perm:<action>:<permId>
+      const parts = callbackData.split(':');
+      return parts.length >= 3 ? parts.slice(2).join(':') : null;
+    }
+    if (callbackData.startsWith('askq_other:')) {
+      // askq_other:<permId>
+      return callbackData.slice('askq_other:'.length) || null;
+    }
+    if (callbackData.startsWith('askq:')) {
+      // askq:<permId>:<qIdx>:<optIdx>
+      const parts = callbackData.split(':');
+      return parts.length >= 2 ? parts[1] : null;
+    }
+    return null;
   }
 
   /**
@@ -337,6 +370,67 @@ export class LarkAdapter extends FeishuAdapter {
         },
       },
     };
+  }
+
+  // ── Expired permission card ─────────────────────────────────
+
+  /**
+   * Build an inline card response for expired permission requests.
+   * Used both for passive expiry (button click after timeout) and active expiry.
+   */
+  private buildExpiredCard(toolName?: string): any {
+    const elements: any[] = [];
+    if (toolName) {
+      elements.push({ tag: 'markdown', content: `Tool: **${toolName}**` });
+    }
+    elements.push({ tag: 'markdown', content: '_This permission request has expired._' });
+
+    return {
+      card: {
+        type: 'raw',
+        data: {
+          config: { wide_screen_mode: true },
+          header: {
+            template: 'grey',
+            title: { tag: 'plain_text', content: '🔐 Expired' },
+          },
+          elements,
+        },
+      },
+    };
+  }
+
+  /**
+   * Update a permission card to show it has expired (proactive timeout).
+   * Uses im.message.patch to replace the card with a grey expired card.
+   */
+  async expirePermissionCard(chatId: string, messageId: string, toolName?: string): Promise<void> {
+    if (!this.restClient) return;
+
+    const elements: any[] = [];
+    if (toolName) {
+      elements.push({ tag: 'markdown', content: `Tool: **${toolName}**` });
+    }
+    elements.push({ tag: 'markdown', content: '_This permission request has expired._' });
+
+    const cardJson = JSON.stringify({
+      config: { wide_screen_mode: true },
+      header: {
+        template: 'grey',
+        title: { tag: 'plain_text', content: '🔐 Expired' },
+      },
+      elements,
+    });
+
+    try {
+      await this.restClient.im.message.patch({
+        path: { message_id: messageId },
+        data: { content: cardJson },
+      });
+      console.log(`[lark-adapter] Permission card expired: ${messageId}`);
+    } catch (err) {
+      console.warn('[lark-adapter] Failed to expire permission card:', err instanceof Error ? err.message : err);
+    }
   }
 
   // ── Permission card with real buttons ───────────────────────

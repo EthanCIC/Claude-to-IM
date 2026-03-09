@@ -16,6 +16,9 @@ import { deliver } from './delivery-layer.js';
 import { getBridgeContext } from './context.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
 
+/** SDK default permission timeout (2 minutes). */
+const PERMISSION_TIMEOUT_MS = 2 * 60 * 1000;
+
 /**
  * Dedup recent permission forwards to prevent duplicate cards.
  * Key: permissionRequestId, value: timestamp. Entries expire after 30s.
@@ -28,6 +31,12 @@ const recentPermissionForwards = new Map<string, number>();
  * from that chat is treated as the answer.
  */
 const pendingTextAnswers = new Map<string, string>();
+
+/**
+ * Active timeout timers for permission cards.
+ * Key: permissionRequestId, value: timer handle.
+ */
+const permissionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
  * Forward a permission request to an IM channel as an interactive message.
@@ -136,8 +145,12 @@ export async function forwardPermissionRequest(
         toolName,
         toolInput,
         suggestions: suggestions ? JSON.stringify(suggestions) : '',
+        createdAt: Date.now(),
       });
     } catch { /* best effort */ }
+
+    // Set timeout timer to expire the card when SDK permission times out
+    schedulePermissionExpiry(adapter, permissionRequestId, address.chatId, result.messageId, toolName);
   }
 }
 
@@ -221,8 +234,12 @@ async function forwardQuestionRequest(
         toolName: 'AskUserQuestion',
         toolInput,
         suggestions: '',
+        createdAt: Date.now(),
       });
     } catch { /* best effort */ }
+
+    // Set timeout timer to expire the card when SDK permission times out
+    schedulePermissionExpiry(adapter, permissionRequestId, address.chatId, result.messageId, 'AskUserQuestion');
   }
 }
 
@@ -288,6 +305,9 @@ export function handlePermissionCallback(
     console.warn(`[permission-broker] Permission ${permissionRequestId} already claimed by concurrent handler`);
     return false;
   }
+
+  // Clear the expiry timer since the user responded in time
+  clearPermissionTimer(permissionRequestId);
 
   let resolved: boolean;
 
@@ -382,6 +402,9 @@ export function handleQuestionCallback(
   }
 
   if (!claimed) return false;
+
+  // Clear the expiry timer since the user responded in time
+  clearPermissionTimer(permissionRequestId);
 
   // Look up question and selected option from stored toolInput
   const questions = link.toolInput?.questions as Array<{
@@ -483,6 +506,9 @@ export function handleTextAnswer(chatId: string, text: string): boolean {
   }
   if (!claimed) return false;
 
+  // Clear the expiry timer since the user responded in time
+  clearPermissionTimer(permissionRequestId);
+
   // Look up the question text from stored toolInput
   const questions = link.toolInput?.questions as Array<{
     question: string;
@@ -500,4 +526,66 @@ export function handleTextAnswer(chatId: string, text: string): boolean {
     behavior: 'allow',
     data: { answers },
   });
+}
+
+// ── Permission expiry timer ─────────────────────────────────
+
+/**
+ * Schedule a timer to expire a permission card after PERMISSION_TIMEOUT_MS.
+ * When the timer fires (and the permission hasn't been resolved), it marks the
+ * link as resolved and calls the adapter's expirePermissionCard to update the card UI.
+ */
+function schedulePermissionExpiry(
+  adapter: BaseChannelAdapter,
+  permissionRequestId: string,
+  chatId: string,
+  messageId: string,
+  toolName: string,
+): void {
+  const timer = setTimeout(() => {
+    permissionTimers.delete(permissionRequestId);
+
+    const { store } = getBridgeContext();
+    const link = store.getPermissionLink(permissionRequestId);
+
+    // Already resolved by user action — nothing to do
+    if (!link || link.resolved) return;
+
+    // Mark as resolved (expired)
+    try {
+      store.markPermissionLinkResolved(permissionRequestId);
+    } catch { /* best effort */ }
+
+    console.log(`[permission-broker] Permission ${permissionRequestId} expired (timeout)`);
+
+    // Update the card UI via the adapter
+    if (adapter.expirePermissionCard) {
+      adapter.expirePermissionCard(chatId, messageId, toolName).catch((err) => {
+        console.warn('[permission-broker] Failed to expire card:', err instanceof Error ? err.message : err);
+      });
+    }
+  }, PERMISSION_TIMEOUT_MS);
+
+  permissionTimers.set(permissionRequestId, timer);
+}
+
+/**
+ * Clear a permission expiry timer (called when the user responds in time).
+ */
+export function clearPermissionTimer(permissionRequestId: string): void {
+  const timer = permissionTimers.get(permissionRequestId);
+  if (timer) {
+    clearTimeout(timer);
+    permissionTimers.delete(permissionRequestId);
+  }
+}
+
+/**
+ * Clear all permission expiry timers (called on bridge stop).
+ */
+export function clearAllPermissionTimers(): void {
+  for (const timer of permissionTimers.values()) {
+    clearTimeout(timer);
+  }
+  permissionTimers.clear();
 }
