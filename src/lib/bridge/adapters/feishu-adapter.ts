@@ -117,8 +117,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private botIds = new Set<string>();
   /** Track last incoming message ID per chat (fallback for typing indicator). */
   private lastIncomingMessageId = new Map<string, string>();
-  /** Cache: open_id → display name (resolved via Contact API). */
+  /** Cache: open_id → display name (resolved via Group Member API or Contact API). */
   private userNameCache = new Map<string, string>();
+  /** Cache: chat_id set of chats whose members have been loaded. */
+  private membersCachedChats = new Set<string>();
   /** Disable Contact API calls after first failure (missing scopes). */
   private contactApiDisabled = false;
   /** Track active typing reaction IDs per message for cleanup. */
@@ -229,39 +231,85 @@ export class FeishuAdapter extends BaseChannelAdapter {
   // ── Sender Identity ────────────────────────────────────────
 
   /**
-   * Resolve a user's display name via the Contact API.
-   * Returns cached value if available; returns null if API is disabled or fails.
-   * Requires `contact:contact.base:readonly` scope on the Feishu app.
+   * Load all members of a chat and populate userNameCache.
+   * Uses Group Member API (im.v1.chat.members) which only requires IM permissions,
+   * unlike Contact API which needs contact:contact.base:readonly.
    */
-  private async resolveUserDisplayName(userId: string): Promise<string | null> {
-    if (!userId || this.contactApiDisabled || !this.restClient) return null;
+  private async loadChatMembers(chatId: string): Promise<void> {
+    if (!this.restClient || this.membersCachedChats.has(chatId)) return;
+
+    try {
+      let pageToken: string | undefined;
+      do {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const resp: any = await this.restClient.im.chatMembers.get({
+          path: { chat_id: chatId },
+          params: {
+            member_id_type: 'open_id',
+            page_size: 100,
+            ...(pageToken ? { page_token: pageToken } : {}),
+          },
+        });
+        const items = resp?.data?.items;
+        if (Array.isArray(items)) {
+          for (const member of items) {
+            if (member.member_id && member.name) {
+              this.userNameCache.set(member.member_id, member.name);
+            }
+          }
+        }
+        pageToken = resp?.data?.page_token || undefined;
+      } while (pageToken);
+
+      this.membersCachedChats.add(chatId);
+    } catch (err) {
+      console.warn(
+        '[feishu-adapter] Failed to load chat members for chatId:', chatId,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  /**
+   * Resolve a user's display name.
+   * 1. Check cache (populated by loadChatMembers or previous lookups)
+   * 2. Fall back to Contact API if available
+   */
+  private async resolveUserDisplayName(userId: string, chatId?: string): Promise<string | null> {
+    if (!userId || !this.restClient) return null;
+
+    // Try loading chat members first if we haven't yet
+    if (chatId && !this.membersCachedChats.has(chatId)) {
+      await this.loadChatMembers(chatId);
+    }
 
     const cached = this.userNameCache.get(userId);
     if (cached) return cached;
 
-    try {
-      const resp = await this.restClient.contact.user.get({
-        path: { user_id: userId },
-        params: { user_id_type: 'open_id' },
-      });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const name = (resp as any)?.data?.user?.name;
-      if (name) {
-        this.userNameCache.set(userId, name);
-        return name;
+    // Fall back to Contact API for users not in the chat member list (e.g. DMs)
+    if (!this.contactApiDisabled) {
+      try {
+        const resp = await this.restClient.contact.user.get({
+          path: { user_id: userId },
+          params: { user_id_type: 'open_id' },
+        });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const name = (resp as any)?.data?.user?.name;
+        if (name) {
+          this.userNameCache.set(userId, name);
+          return name;
+        }
+      } catch (err) {
+        console.warn(
+          '[feishu-adapter] Contact API failed for userId:', userId,
+          '— disabling Contact API fallback.',
+          err instanceof Error ? err.message : err,
+        );
+        this.contactApiDisabled = true;
       }
-      return null;
-    } catch (err) {
-      // If the first call fails (likely missing scope), disable further attempts
-      // to avoid spamming the API with 403s on every message.
-      console.warn(
-        '[feishu-adapter] Contact API failed for userId:', userId,
-        '— disabling sender name resolution.',
-        err instanceof Error ? err.message : err,
-      );
-      this.contactApiDisabled = true;
-      return null;
     }
+
+    return null;
   }
 
   /**
@@ -938,7 +986,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Resolve sender display name (for audit trail, memory, and group chat identity)
     let displayName: string | undefined;
     if (userId) {
-      const name = await this.resolveUserDisplayName(userId)
+      const name = await this.resolveUserDisplayName(userId, chatId)
         || this.extractSenderNameFromMentions(msg.mentions, userId)
         || undefined;
       if (name) displayName = name;
