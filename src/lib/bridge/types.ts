@@ -9,6 +9,9 @@
 // Re-export bridge-local types from host.ts so consumers can import from one place
 export type { FileAttachment } from './host.js';
 
+/** User permission role for access control. undefined = no role enforcement (legacy). */
+export type UserRole = 'admin' | 'powerUser' | 'regular';
+
 // ── Channel Types ──────────────────────────────────────────────
 
 /**

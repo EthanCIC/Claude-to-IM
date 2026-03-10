@@ -220,6 +220,8 @@ export interface StreamChatParams {
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   files?: FileAttachment[];
   onRuntimeStatusChange?: (status: string) => void;
+  /** User permission role. undefined = no role enforcement (legacy). */
+  userRole?: import('./types.js').UserRole;
 }
 
 export interface LLMProvider {
