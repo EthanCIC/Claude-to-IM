@@ -67,6 +67,8 @@ type FeishuMessageEventData = {
       id: { open_id?: string; union_id?: string; user_id?: string };
       name: string;
     }>;
+    parent_id?: string;
+    root_id?: string;
   };
 };
 
@@ -310,6 +312,80 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     return null;
+  }
+
+  /**
+   * Fetch the content of a quoted (replied-to) message by its message_id.
+   * Returns a formatted string like "[Replying to 張三: 原始訊息內容]", or null on failure.
+   */
+  private async fetchQuotedContent(parentId: string, chatId?: string): Promise<string | null> {
+    if (!this.restClient) return null;
+    try {
+      const resp = await this.restClient.im.message.get({
+        path: { message_id: parentId },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const item = (resp as any)?.data?.items?.[0];
+      if (!item) return null;
+
+      const msgType: string = item.msg_type || '';
+      const rawContent: string = item.body?.content || '';
+      const senderId: string | undefined = item.sender?.id;
+
+      // Parse message content based on type
+      let content: string;
+      if (msgType === 'text') {
+        try {
+          const parsed = JSON.parse(rawContent);
+          content = parsed.text || rawContent;
+        } catch {
+          content = rawContent;
+        }
+      } else if (msgType === 'post') {
+        const { extractedText } = this.parsePostContent(rawContent);
+        content = extractedText || '[post]';
+      } else if (msgType === 'image') {
+        content = '[image]';
+      } else if (msgType === 'file') {
+        try {
+          const parsed = JSON.parse(rawContent);
+          content = `[file: ${parsed.file_name || 'unknown'}]`;
+        } catch {
+          content = '[file]';
+        }
+      } else if (msgType === 'audio') {
+        content = '[audio]';
+      } else if (msgType === 'video') {
+        content = '[video]';
+      } else if (msgType === 'sticker') {
+        content = '[sticker]';
+      } else {
+        content = `[${msgType || 'unknown'}]`;
+      }
+
+      // Truncate very long quoted content
+      if (content.length > 200) {
+        content = content.slice(0, 200) + '…';
+      }
+
+      // Resolve sender name
+      let senderName: string | undefined;
+      if (senderId) {
+        senderName = await this.resolveUserDisplayName(senderId, chatId) || undefined;
+      }
+
+      if (senderName) {
+        return `[Replying to ${senderName}: ${content}]`;
+      }
+      return `[Replying to: ${content}]`;
+    } catch (err) {
+      console.warn(
+        '[feishu-adapter] Failed to fetch quoted message:',
+        parentId,
+        err instanceof Error ? err.message : err,
+      );
+      return null;
+    }
   }
 
   /**
@@ -978,6 +1054,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     // Strip @mention markers from text
     text = this.stripMentionMarkers(text);
+
+    // Fetch quoted message content if this is a reply
+    if (msg.parent_id) {
+      const quoted = await this.fetchQuotedContent(msg.parent_id, chatId);
+      if (quoted) {
+        text = `${quoted}\n\n${text}`;
+      }
+    }
 
     if (!text.trim() && attachments.length === 0 && !isGroup) return;
 
