@@ -7,7 +7,7 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, UserRole } from './types.js';
+import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, UserRole, FileAttachment } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 // Side-effect import: triggers self-registration of all adapter factories
@@ -36,13 +36,17 @@ const GLOBAL_KEY = '__bridge_manager__';
 const OBSERVE_BUFFER_MAX = 50;
 
 /** Per-chat buffer of observe-only messages (group chats without @mention). */
-const observeBuffers = new Map<string, string[]>();
+interface ObserveEntry {
+  text: string;
+  attachments?: FileAttachment[];
+}
+const observeBuffers = new Map<string, ObserveEntry[]>();
 
 /**
  * Add an observe-only message to the per-chat buffer.
  * Format: "[Name] text" or "[userId] text" if no display name.
  */
-function bufferObserveMessage(chatId: string, displayName: string | undefined, userId: string | undefined, text: string): void {
+function bufferObserveMessage(chatId: string, displayName: string | undefined, userId: string | undefined, text: string, attachments?: FileAttachment[]): void {
   const label = displayName || userId || 'unknown';
   const line = `[${label}] ${text}`;
   let buf = observeBuffers.get(chatId);
@@ -50,7 +54,7 @@ function bufferObserveMessage(chatId: string, displayName: string | undefined, u
     buf = [];
     observeBuffers.set(chatId, buf);
   }
-  buf.push(line);
+  buf.push({ text: line, attachments });
   // Ring buffer: drop oldest when full
   if (buf.length > OBSERVE_BUFFER_MAX) {
     buf.splice(0, buf.length - OBSERVE_BUFFER_MAX);
@@ -61,18 +65,20 @@ function bufferObserveMessage(chatId: string, displayName: string | undefined, u
  * Drain and return all buffered observe messages for a chat.
  * Returns null if buffer is empty.
  */
-function drainObserveBuffer(chatId: string): string | null {
+function drainObserveBuffer(chatId: string): { text: string; attachments: FileAttachment[] } | null {
   const buf = observeBuffers.get(chatId);
   if (!buf || buf.length === 0) return null;
-  const context = buf.join('\n');
+  const text = buf.map(e => e.text).join('\n');
+  const attachments = buf.flatMap(e => e.attachments || []);
   observeBuffers.delete(chatId);
-  return context;
+  return { text, attachments };
 }
 
 function hasObserveBuffer(chatId: string): boolean {
   const buf = observeBuffers.get(chatId);
   return !!buf && buf.length > 0;
 }
+
 
 // ── User role resolution ───────────────────────────────────────
 
@@ -575,7 +581,7 @@ async function handleMessage(
 
   // Observe-only messages: buffer for context, don't trigger LLM
   if (msg.observeOnly) {
-    bufferObserveMessage(msg.address.chatId, msg.address.displayName, msg.address.userId, msg.text.trim());
+    bufferObserveMessage(msg.address.chatId, msg.address.displayName, msg.address.userId, msg.text.trim(), msg.attachments);
     ack();
     return;
   }
@@ -720,10 +726,16 @@ async function handleMessage(
     const rawPrompt = text || (hasAttachments ? 'Describe this image.' : '');
 
     // Prepend buffered observe-only messages as group chat context
-    const observeContext = drainObserveBuffer(msg.address.chatId);
-    const contextPrefix = observeContext
-      ? `[Recent group messages]\n${observeContext}\n\n`
+    const observeDrain = drainObserveBuffer(msg.address.chatId);
+    const contextPrefix = observeDrain
+      ? `[Recent group messages]\n${observeDrain.text}\n\n`
       : '';
+
+    // Merge observe-only attachments (e.g. images from non-@bot messages) with current message attachments
+    const allAttachments: FileAttachment[] = [
+      ...(observeDrain?.attachments || []),
+      ...(hasAttachments ? msg.attachments! : []),
+    ];
 
     // Prefix the prompt with sender identity so the LLM always knows who is speaking
     const senderPrefix = msg.address.displayName
@@ -750,7 +762,7 @@ async function handleMessage(
         perm.suggestions,
         msg.messageId,
       );
-    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText,
+    }, taskAbort.signal, allAttachments.length > 0 ? allAttachments : undefined, onPartialText,
     // onToolUse: split preview at tool boundaries
     (previewState && streamCfg) ? (_toolName: string) => {
       if (!previewState || previewState.degraded) return;
