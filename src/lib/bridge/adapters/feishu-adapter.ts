@@ -985,11 +985,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     if (messageType === 'text') {
       text = this.parseTextContent(msg.content);
-    } else if (observeOnly) {
-      // For observe-only messages, skip file downloads — just record the type
-      text = `[${messageType}]`;
     } else if (messageType === 'image') {
-      // [P1] Download image with failure fallback
+      // [P1] Download image with failure fallback (also in observe-only for visual context)
       console.log('[feishu-adapter] Image message received, content:', msg.content);
       const fileKey = this.extractFileKey(msg.content);
       console.log('[feishu-adapter] Extracted fileKey:', fileKey);
@@ -1010,6 +1007,20 @@ export class FeishuAdapter extends BaseChannelAdapter {
           } catch { /* best effort */ }
         }
       }
+    } else if (messageType === 'post') {
+      // [P2] Extract text and image keys from rich text (post) messages (also in observe-only)
+      const { extractedText, imageKeys } = this.parsePostContent(msg.content);
+      text = extractedText;
+      for (const key of imageKeys) {
+        const attachment = await this.downloadResource(msg.message_id, key, 'image');
+        if (attachment) {
+          attachments.push(attachment);
+        }
+        // Don't add fallback text for individual post images — the text already carries context
+      }
+    } else if (observeOnly) {
+      // For observe-only messages, skip heavy file downloads — just record the type
+      text = `[${messageType}]`;
     } else if (messageType === 'file' || messageType === 'audio' || messageType === 'video' || messageType === 'media') {
       // [P2] Support file/audio/video/media downloads
       const fileKey = this.extractFileKey(msg.content);
@@ -1034,17 +1045,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
             });
           } catch { /* best effort */ }
         }
-      }
-    } else if (messageType === 'post') {
-      // [P2] Extract text and image keys from rich text (post) messages
-      const { extractedText, imageKeys } = this.parsePostContent(msg.content);
-      text = extractedText;
-      for (const key of imageKeys) {
-        const attachment = await this.downloadResource(msg.message_id, key, 'image');
-        if (attachment) {
-          attachments.push(attachment);
-        }
-        // Don't add fallback text for individual post images — the text already carries context
       }
     } else {
       // Unsupported type — log and skip
