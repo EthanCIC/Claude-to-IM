@@ -7,7 +7,7 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState } from './types.js';
+import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, UserRole } from './types.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 // Side-effect import: triggers self-registration of all adapter factories
@@ -72,6 +72,30 @@ function drainObserveBuffer(chatId: string): string | null {
 function hasObserveBuffer(chatId: string): boolean {
   const buf = observeBuffers.get(chatId);
   return !!buf && buf.length > 0;
+}
+
+// ── User role resolution ───────────────────────────────────────
+
+/**
+ * Resolve the user's permission role from bridge settings.
+ * Returns undefined when no role config exists (legacy mode — no restrictions).
+ */
+function resolveUserRole(channelType: string, userId?: string): UserRole | undefined {
+  const { store } = getBridgeContext();
+  const adminsRaw = store.getSetting('bridge_admins');
+  const powerUsersRaw = store.getSetting('bridge_power_users');
+  if (!adminsRaw && !powerUsersRaw) return undefined; // no config → legacy
+  if (!userId) return 'regular';
+  const key = `${channelType}:${userId}`;
+  if (adminsRaw) {
+    const list = adminsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    if (list.includes(key) || list.includes(userId)) return 'admin';
+  }
+  if (powerUsersRaw) {
+    const list = powerUsersRaw.split(',').map(s => s.trim()).filter(Boolean);
+    if (list.includes(key) || list.includes(userId)) return 'powerUser';
+  }
+  return 'regular';
 }
 
 // ── Streaming preview helpers ──────────────────────────────────
@@ -513,6 +537,21 @@ async function handleMessage(
 
   // Handle callback queries (permission buttons or question answers)
   if (msg.callbackData) {
+    // Validate permission button clicks when roles are configured
+    if (msg.callbackData.startsWith('perm:allow')) {
+      const clickerRole = resolveUserRole(adapter.channelType, msg.address.userId);
+      if (clickerRole === 'regular') {
+        // Regular users cannot approve dangerous operations
+        await deliver(adapter, {
+          address: msg.address,
+          text: 'You don\'t have permission to approve this operation.',
+          parseMode: 'plain',
+        });
+        ack();
+        return;
+      }
+    }
+
     let handled = false;
     if (msg.callbackData.startsWith('askq_other:')) {
       handled = broker.handleOtherCallback(msg.callbackData, msg.address.chatId);
@@ -692,6 +731,8 @@ async function handleMessage(
       : '';
     const promptText = `${contextPrefix}${senderPrefix}${rawPrompt}`;
 
+    const userRole = resolveUserRole(adapter.channelType, msg.address.userId);
+
     const result = await engine.processMessage(binding, promptText, async (perm) => {
       // ── Finalize current preview segment before permission card ──
       if (previewState && streamCfg) {
@@ -716,7 +757,7 @@ async function handleMessage(
       if (previewState.lastSentAt > 0 || previewState.pendingText.length > 0) {
         finalizePreviewSegment(adapter, previewState, streamCfg!, msg.address.chatId);
       }
-    } : undefined);
+    } : undefined, userRole);
 
     // Send response text — render via channel-appropriate format.
     // If streaming preview was active and not degraded, the preview card already

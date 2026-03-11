@@ -8,7 +8,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import type { ChannelBinding } from './types.js';
+import type { ChannelBinding, UserRole } from './types.js';
 import type {
   FileAttachment,
   SSEEvent,
@@ -69,6 +69,7 @@ export async function processMessage(
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
   onToolUse?: OnToolUse,
+  userRole?: UserRole,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -205,6 +206,7 @@ export async function processMessage(
       onRuntimeStatusChange: (status: string) => {
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },
+      userRole,
     });
 
     // Consume the stream server-side (replicate collectStreamResponse pattern).
