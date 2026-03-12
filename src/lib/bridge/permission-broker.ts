@@ -545,7 +545,7 @@ function schedulePermissionExpiry(
   const timer = setTimeout(() => {
     permissionTimers.delete(permissionRequestId);
 
-    const { store } = getBridgeContext();
+    const { store, permissions } = getBridgeContext();
     const link = store.getPermissionLink(permissionRequestId);
 
     // Already resolved by user action — nothing to do
@@ -555,6 +555,12 @@ function schedulePermissionExpiry(
     try {
       store.markPermissionLinkResolved(permissionRequestId);
     } catch { /* best effort */ }
+
+    // Resolve the SDK pending permission so the session unlocks
+    permissions.resolvePendingPermission(permissionRequestId, {
+      behavior: 'deny',
+      message: 'Permission expired (timeout)',
+    });
 
     console.log(`[permission-broker] Permission ${permissionRequestId} expired (timeout)`);
 
