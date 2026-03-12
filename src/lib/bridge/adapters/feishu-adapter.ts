@@ -137,6 +137,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private previewQueuedUpdate = new Map<string, string>();
   /** Generation counter per chat — incremented by endPreview to invalidate in-flight creates. */
   private previewGeneration = new Map<string, number>();
+  /** Cache: messageId → final text content for bot-sent messages (for quote resolution). */
+  private botMessageContentCache = new Map<string, string>();
+  private static readonly BOT_CONTENT_CACHE_MAX = 200;
 
   protected setting(key: string): string {
     return getBridgeContext().store.getSetting(`bridge_${this.channelType}_${key}`) || '';
@@ -220,6 +223,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.previewDegraded.clear();
     this.previewQueuedUpdate.clear();
     this.previewGeneration.clear();
+    this.botMessageContentCache.clear();
     this.userNameCache.clear();
     this.contactApiDisabled = false;
 
@@ -319,6 +323,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Returns a formatted string like "[Replying to 張三: 原始訊息內容]", or null on failure.
    */
   private async fetchQuotedContent(parentId: string, chatId?: string): Promise<string | null> {
+    // Check local cache first (bot-sent messages whose PATCH content isn't in API)
+    const cached = this.botMessageContentCache.get(parentId);
+    if (cached) {
+      const truncated = cached.length > 200 ? cached.slice(0, 200) + '…' : cached;
+      return `[Replying to bot: ${truncated}]`;
+    }
+
     if (!this.restClient) return null;
     try {
       const resp = await this.restClient.im.message.get({
@@ -359,6 +370,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
         content = '[video]';
       } else if (msgType === 'sticker') {
         content = '[sticker]';
+      } else if (msgType === 'interactive') {
+        try {
+          const parsed = JSON.parse(rawContent);
+          content = this.extractInteractiveText(parsed) || '[interactive]';
+        } catch {
+          content = '[interactive]';
+        }
       } else {
         content = `[${msgType || 'unknown'}]`;
       }
@@ -368,9 +386,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
         content = content.slice(0, 200) + '…';
       }
 
-      // Resolve sender name
+      // Resolve sender name — bot IDs start with "cli_", skip Contact API
       let senderName: string | undefined;
-      if (senderId) {
+      if (senderId && senderId.startsWith('cli_')) {
+        senderName = 'bot';
+      } else if (senderId) {
         senderName = await this.resolveUserDisplayName(senderId, chatId) || undefined;
       }
 
@@ -513,6 +533,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
           path: { message_id: existingMsgId },
           data: { content: cardJson },
         });
+        // Cache latest text for quote resolution (PATCH doesn't update im.message.get)
+        this.cacheBotMessageContent(existingMsgId, text);
         return 'sent';
       } else {
         // Guard: if a create is already in-flight, queue the update
@@ -534,6 +556,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
             },
           });
           if (res?.data?.message_id) {
+            console.log(`[feishu-adapter] Sent preview to ${chatId}, msgId: ${res.data.message_id}`);
+            // Cache content for quote resolution
+            this.cacheBotMessageContent(res.data.message_id, text);
             // Only adopt this card for future updates if endPreview hasn't been
             // called during the create. If generation changed, the card belongs to
             // a finalized segment — don't track it for future PATCHes.
@@ -578,6 +603,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
   endPreview(chatId: string, _draftId: number): void {
     // Keep the preview card as the final message — bridge-manager skips
     // deliverResponse when preview was active, so this card IS the response.
+    console.log(`[feishu-adapter] Preview finalized for ${chatId}`);
     this.previewMessages.delete(chatId);
     this.previewCreating.delete(chatId);
     // Increment generation so in-flight creates don't re-adopt stale card IDs
@@ -640,6 +666,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
       if (res?.data?.message_id) {
         console.log(`[feishu-adapter] Sent card to ${chatId}, msgId: ${res.data.message_id}`);
+        this.cacheBotMessageContent(res.data.message_id, text);
         return { ok: true, messageId: res.data.message_id };
       }
       console.warn('[feishu-adapter] Card send failed:', res?.msg, res?.code);
@@ -670,6 +697,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
       if (res?.data?.message_id) {
         console.log(`[feishu-adapter] Sent post to ${chatId}, msgId: ${res.data.message_id}`);
+        this.cacheBotMessageContent(res.data.message_id, text);
         return { ok: true, messageId: res.data.message_id };
       }
       console.warn('[feishu-adapter] Post send failed:', res?.msg, res?.code);
@@ -1199,6 +1227,74 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     return { extractedText: textParts.join('').trim(), imageKeys };
+  }
+
+  /**
+   * Recursively extract text from an interactive card JSON structure.
+   * Handles both Card v1 (legacy) and Card v2 (schema 2.0) formats.
+   */
+  private extractInteractiveText(card: Record<string, unknown>): string {
+    const parts: string[] = [];
+
+    // Card title — check both header.title.content (Card v2) and top-level title (Card v1)
+    const header = card.header as Record<string, unknown> | undefined;
+    if (header) {
+      const title = header.title as Record<string, unknown> | undefined;
+      if (title?.content && typeof title.content === 'string') {
+        parts.push(title.content);
+      }
+    }
+    if (typeof card.title === 'string' && card.title) {
+      parts.push(card.title);
+    }
+
+    // Recursively extract text from elements
+    const walk = (node: unknown): void => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item);
+        return;
+      }
+      const obj = node as Record<string, unknown>;
+      const tag = obj.tag as string | undefined;
+
+      // Text elements (both Card v1 `text` field and Card v2 `content` field)
+      if (tag === 'text' && typeof obj.text === 'string' && obj.text.trim()) {
+        parts.push(obj.text);
+      } else if ((tag === 'plain_text' || tag === 'lark_md' || tag === 'markdown') && typeof obj.content === 'string' && obj.content.trim()) {
+        parts.push(obj.content);
+      } else if (tag === 'div') {
+        if (obj.text) walk(obj.text);
+        if (obj.extra) walk(obj.extra);
+      } else if (tag === 'column_set' || tag === 'column') {
+        if (obj.columns) walk(obj.columns);
+        if (obj.elements) walk(obj.elements);
+      } else if (tag === 'img') {
+        parts.push('[image]');
+      }
+
+      // Recurse into elements/body
+      if (obj.elements) walk(obj.elements);
+      if (obj.body && typeof obj.body === 'object') {
+        walk((obj.body as Record<string, unknown>).elements);
+      }
+    };
+
+    walk(card.elements || card.body);
+    return parts.join('\n').trim();
+  }
+
+  /**
+   * Cache bot-sent message content for quote resolution.
+   * Lark's im.message.get doesn't return PATCH-updated card content,
+   * so we cache the plaintext locally.
+   */
+  private cacheBotMessageContent(messageId: string, text: string): void {
+    if (this.botMessageContentCache.size >= FeishuAdapter.BOT_CONTENT_CACHE_MAX) {
+      const firstKey = this.botMessageContentCache.keys().next().value;
+      if (firstKey) this.botMessageContentCache.delete(firstKey);
+    }
+    this.botMessageContentCache.set(messageId, text);
   }
 
   // ── Bot identity ────────────────────────────────────────────
