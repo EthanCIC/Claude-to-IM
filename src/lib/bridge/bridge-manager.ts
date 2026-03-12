@@ -775,7 +775,14 @@ async function handleMessage(
     // If streaming preview was active and not degraded, the preview card already
     // contains the final text — skip the redundant deliverResponse.
     const previewHandledDelivery = previewState && !previewState.degraded && previewState.lastSentAt > 0;
-    if (result.responseText && !previewHandledDelivery) {
+    if (previewHandledDelivery) {
+      console.log(`[bridge-manager] Response delivered via streaming preview to ${msg.address.chatId}`);
+    }
+    // Filter out Claude Code internal "no-op" responses that should never reach IM.
+    // "No response requested." is a CLI convention (synthetic or LLM-generated) that
+    // the CLI UI hides; the bridge must do the same.
+    const isNoOpResponse = result.responseText.trim() === 'No response requested.';
+    if (result.responseText && !previewHandledDelivery && !isNoOpResponse) {
       await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
     } else if (result.hasError) {
       const errorResponse: OutboundMessage = {
