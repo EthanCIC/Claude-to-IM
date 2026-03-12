@@ -16,6 +16,7 @@ import type {
   MessageContentBlock,
 } from './host.js';
 import { getBridgeContext } from './context.js';
+import { compressImages } from './image-compression.js';
 import crypto from 'crypto';
 
 export interface PermissionRequestInfo {
@@ -134,11 +135,20 @@ export async function processMessage(
     // files (persisted to disk, referenced by path so Claude can Read them).
     const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
     let promptText = text;
-    const imageOnlyFiles = files?.filter(f => IMAGE_TYPES.has(f.type));
+    let imageOnlyFiles = files?.filter(f => IMAGE_TYPES.has(f.type));
     const nonImagePaths = persistedFilePaths.filter(f => !IMAGE_TYPES.has(f.type));
     if (nonImagePaths.length > 0) {
       const fileList = nonImagePaths.map(f => `- ${f.filePath} (${f.name}, ${f.size} bytes)`).join('\n');
       promptText = `[Files attached — use the Read tool to access them:\n${fileList}]\n\n${text}`;
+    }
+
+    // Compress oversized images before sending to the LLM (5MB base64 API limit)
+    if (imageOnlyFiles && imageOnlyFiles.length > 0) {
+      try {
+        imageOnlyFiles = await compressImages(imageOnlyFiles);
+      } catch (err) {
+        console.warn('[conversation-engine] Image compression failed, sending originals:', err instanceof Error ? err.message : err);
+      }
     }
 
     // Resolve provider
