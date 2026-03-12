@@ -787,6 +787,8 @@ async function handleMessage(
     const previewHandledDelivery = previewState && !previewState.degraded && lastFlushOk;
     if (previewHandledDelivery) {
       console.log(`[bridge-manager] Response delivered via streaming preview to ${msg.address.chatId}`);
+    } else if (previewState && !previewState.degraded && previewState.lastSentAt > 0 && !lastFlushOk) {
+      console.warn(`[bridge-manager] Streaming preview final flush failed for ${msg.address.chatId}, falling back to deliverResponse`);
     }
     // Filter out Claude Code internal "no-op" responses that should never reach IM.
     // "No response requested." is a CLI convention (synthetic or LLM-generated) that
