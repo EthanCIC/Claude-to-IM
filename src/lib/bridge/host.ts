@@ -199,6 +199,10 @@ export interface BridgeStore {
   getPermissionLink(permissionRequestId: string): PermissionLinkRecord | null;
   markPermissionLinkResolved(permissionRequestId: string): boolean;
 
+  // ── Group context ──
+  /** Return per-group system prompt context for a chat, or null if none configured. */
+  getGroupContext?(channelType: string, chatId: string): string | null;
+
   // ── Channel offsets (adapter watermarks) ──
   getChannelOffset(key: string): string;
   setChannelOffset(key: string, offset: string): void;

@@ -194,7 +194,9 @@ export async function processMessage(
       `The user is communicating via ${binding.channelType} (IM platform).`,
       `Responses are rendered as ${binding.channelType === 'telegram' ? 'HTML' : 'markdown'} in a chat app — keep formatting simple and responses concise.`,
     ].join(' ');
-    const appendParts = [session?.system_prompt, channelContext].filter(Boolean);
+    // Load per-group context (behavior rules, identity, domain knowledge) if the host provides it
+    const groupContext = store.getGroupContext?.(binding.channelType, binding.chatId) ?? null;
+    const appendParts = [session?.system_prompt, groupContext, channelContext].filter(Boolean);
     const systemPrompt = {
       type: 'preset' as const,
       preset: 'claude_code' as const,
