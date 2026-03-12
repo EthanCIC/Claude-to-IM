@@ -199,6 +199,8 @@ export interface StreamingPreviewState {
   /** Character offset into the full accumulated text — text before this offset
    *  was already finalized in a previous preview segment. */
   textOffset: number;
+  /** Promise from the most recent flushPreview call. Awaited before deciding fallback. */
+  lastFlushPromise: Promise<boolean> | null;
 }
 
 // ── Config ─────────────────────────────────────────────────────

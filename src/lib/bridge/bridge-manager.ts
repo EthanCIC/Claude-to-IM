@@ -135,7 +135,9 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
   return { intervalMs, minDeltaChars, maxChars };
 }
 
-/** Fire-and-forget: send a preview draft. Only degrades on permanent failure. */
+/** Fire-and-forget: send a preview draft. Only degrades on permanent failure.
+ *  Stores the resulting Promise on state.lastFlushPromise so the final flush
+ *  can be awaited before deciding whether to fall back to deliverResponse. */
 function flushPreview(
   adapter: BaseChannelAdapter,
   state: StreamingPreviewState,
@@ -150,12 +152,13 @@ function flushPreview(
   state.lastSentText = text;
   state.lastSentAt = Date.now();
 
-  adapter.sendPreview(state.chatId, text, state.draftId).then(result => {
-    if (result === 'degrade') state.degraded = true;
-    // 'skip' — transient failure, next flush will retry naturally
-  }).catch(() => {
-    // Network error — transient, don't degrade
-  });
+  const promise = adapter.sendPreview(state.chatId, text, state.draftId).then(result => {
+    if (result === 'degrade') { state.degraded = true; return false; }
+    if (result === 'skip') return false;
+    return true; // 'sent'
+  }).catch(() => false);
+
+  state.lastFlushPromise = promise;
 }
 
 /**
@@ -185,6 +188,7 @@ function finalizePreviewSegment(
   ps.lastSentText = '';
   ps.lastSentAt = 0;
   ps.pendingText = '';
+  ps.lastFlushPromise = null;
 }
 
 // ── Channel-aware rendering dispatch ──────────────────────────
@@ -667,6 +671,7 @@ async function handleMessage(
       throttleTimer: null,
       pendingText: '',
       textOffset: 0,
+      lastFlushPromise: null,
     };
   }
 
@@ -774,7 +779,12 @@ async function handleMessage(
     // Send response text — render via channel-appropriate format.
     // If streaming preview was active and not degraded, the preview card already
     // contains the final text — skip the redundant deliverResponse.
-    const previewHandledDelivery = previewState && !previewState.degraded && previewState.lastSentAt > 0;
+    // Await the last flush promise to confirm the preview was actually delivered,
+    // not just optimistically marked as sent. (ETH-80)
+    const lastFlushOk = previewState?.lastFlushPromise
+      ? await previewState.lastFlushPromise
+      : false;
+    const previewHandledDelivery = previewState && !previewState.degraded && lastFlushOk;
     if (previewHandledDelivery) {
       console.log(`[bridge-manager] Response delivered via streaming preview to ${msg.address.chatId}`);
     }
@@ -815,6 +825,10 @@ async function handleMessage(
       // Final flush to ensure the preview card has the latest text
       if (streamCfg && !previewState.degraded && previewState.pendingText !== previewState.lastSentText) {
         flushPreview(adapter, previewState, streamCfg);
+      }
+      // Await the final flush before ending the preview card (ETH-80)
+      if (previewState.lastFlushPromise) {
+        await previewState.lastFlushPromise.catch(() => {});
       }
       adapter.endPreview?.(msg.address.chatId, previewState.draftId);
     }
