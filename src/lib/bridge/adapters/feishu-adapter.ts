@@ -1080,8 +1080,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return;
     }
 
-    // Strip @mention markers from text
-    text = this.stripMentionMarkers(text);
+    // Resolve @mention placeholders to actual names
+    text = this.resolveMentionMarkers(text, msg.mentions);
 
     // Fetch quoted message content if this is a reply
     if (msg.parent_id) {
@@ -1365,8 +1365,20 @@ export class FeishuAdapter extends BaseChannelAdapter {
     });
   }
 
-  private stripMentionMarkers(text: string): string {
-    // Feishu uses @_user_N placeholders for mentions
+  private resolveMentionMarkers(
+    text: string,
+    mentions?: FeishuMessageEventData['message']['mentions'],
+  ): string {
+    if (!mentions || mentions.length === 0) {
+      return text.replace(/@_user_\d+/g, '').trim();
+    }
+    // Replace all @_user_N placeholders with actual names to preserve semantics
+    for (const m of mentions) {
+      if (m.key && m.name) {
+        text = text.replace(m.key, `@${m.name}`);
+      }
+    }
+    // Clean up any unresolved placeholders (shouldn't happen, but just in case)
     return text.replace(/@_user_\d+/g, '').trim();
   }
 
