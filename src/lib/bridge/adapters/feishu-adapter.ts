@@ -583,6 +583,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
           path: { message_id: messageId },
           data: { content: cardJson },
         });
+        if (attempt > 0) {
+          console.log(`[feishu-adapter] PATCH succeeded after ${attempt} retry(s) for ${messageId}`);
+        }
         return; // success
       } catch (err) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
