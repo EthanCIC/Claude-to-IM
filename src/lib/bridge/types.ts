@@ -199,6 +199,8 @@ export interface StreamingPreviewState {
   /** Character offset into the full accumulated text — text before this offset
    *  was already finalized in a previous preview segment. */
   textOffset: number;
+  /** True while a sendPreview call is in-flight (prevents concurrent PATCHes). */
+  flushInFlight: boolean;
   /** Promise from the most recent flushPreview call. Awaited before deciding fallback. */
   lastFlushPromise: Promise<boolean> | null;
   /** True once any preview PATCH has been confirmed delivered. Survives segment resets. */

@@ -135,21 +135,25 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
 
 /** Fire-and-forget: send a preview draft. Only degrades on permanent failure.
  *  Stores the resulting Promise on state.lastFlushPromise so the final flush
- *  can be awaited before deciding whether to fall back to deliverResponse. */
+ *  can be awaited before deciding whether to fall back to deliverResponse.
+ *  Uses flushInFlight to prevent concurrent PATCHes from the same session. */
 function flushPreview(
   adapter: BaseChannelAdapter,
   state: StreamingPreviewState,
   config: StreamConfig,
 ): void {
   if (state.degraded || !adapter.sendPreview) return;
+  if (state.flushInFlight) return; // Another PATCH is in-flight — skip, trailing timer will retry
 
   const text = state.pendingText.length > config.maxChars
     ? state.pendingText.slice(0, config.maxChars) + '...'
     : state.pendingText;
 
   // Don't update lastSentText/lastSentAt here — wait for PATCH confirmation (ETH-91 bug 2)
+  state.flushInFlight = true;
 
   const promise = adapter.sendPreview(state.chatId, text, state.draftId).then(result => {
+    state.flushInFlight = false;
     if (result === 'degrade') { state.degraded = true; return false; }
     if (result === 'skip') return false;
     // PATCH confirmed — now safe to update tracking state
@@ -157,7 +161,7 @@ function flushPreview(
     state.lastSentAt = Date.now();
     state.previewEverDelivered = true;
     return true; // 'sent'
-  }).catch(() => false);
+  }).catch(() => { state.flushInFlight = false; return false; });
 
   state.lastFlushPromise = promise;
 }
@@ -669,6 +673,7 @@ async function handleMessage(
       lastSentText: '',
       lastSentAt: 0,
       degraded: false,
+      flushInFlight: false,
       throttleTimer: null,
       pendingText: '',
       textOffset: 0,
@@ -724,6 +729,15 @@ async function handleMessage(
       ps.throttleTimer = null;
     }
     flushPreview(adapter, ps, cfg);
+
+    // If flush was skipped (another PATCH in-flight), schedule trailing timer
+    // so the pending text gets sent after the in-flight PATCH completes.
+    if (ps.flushInFlight && !ps.throttleTimer) {
+      ps.throttleTimer = setTimeout(() => {
+        ps.throttleTimer = null;
+        if (!ps.degraded) flushPreview(adapter, ps, cfg);
+      }, cfg.intervalMs);
+    }
   } : undefined;
 
   try {
@@ -778,16 +792,33 @@ async function handleMessage(
     // Send response text — render via channel-appropriate format.
     // If streaming preview was active and not degraded, the preview card already
     // contains the final text — skip the redundant deliverResponse.
-    // Await the last flush promise to ensure the final card content is up to date,
-    // but use previewEverDelivered (not lastFlushOk) for the fallback decision.
-    // This prevents duplicate messages when finalizePreviewSegment clears
-    // lastFlushPromise at tool boundaries with no trailing text. (ETH-91)
-    const lastFlushOk = previewState?.lastFlushPromise
-      ? await previewState.lastFlushPromise
-      : false;
-    const previewHandledDelivery = previewState && !previewState.degraded && previewState.previewEverDelivered;
+    //
+    // Before deciding, ensure the final text is up to date:
+    // 1. Wait for any in-flight flush to complete
+    // 2. If pending text differs from last sent text, do one final flush
+    // 3. Only trust preview delivery if final text matches (ETH-95)
+    if (previewState && streamCfg && !previewState.degraded) {
+      // Wait for in-flight flush before attempting final flush
+      if (previewState.flushInFlight && previewState.lastFlushPromise) {
+        await previewState.lastFlushPromise.catch(() => {});
+      }
+      // Final flush if pending text differs from what was confirmed sent
+      if (previewState.pendingText && previewState.pendingText !== previewState.lastSentText) {
+        flushPreview(adapter, previewState, streamCfg);
+        if (previewState.lastFlushPromise) {
+          await previewState.lastFlushPromise.catch(() => {});
+        }
+      }
+    }
+    const previewHandledDelivery = previewState
+      && !previewState.degraded
+      && previewState.previewEverDelivered
+      && previewState.pendingText === previewState.lastSentText; // verify final text matches (ETH-95)
     if (previewHandledDelivery) {
       console.log(`[bridge-manager] Response delivered via streaming preview to ${msg.address.chatId}`);
+    } else if (previewState && !previewState.degraded && previewState.previewEverDelivered
+      && previewState.pendingText !== previewState.lastSentText) {
+      console.warn(`[bridge-manager] Streaming preview final text not confirmed for ${msg.address.chatId}, falling back to deliverResponse`);
     } else if (previewState && !previewState.degraded && !previewState.previewEverDelivered) {
       console.warn(`[bridge-manager] Streaming preview never delivered for ${msg.address.chatId}, falling back to deliverResponse`);
     }
@@ -824,6 +855,10 @@ async function handleMessage(
       if (previewState.throttleTimer) {
         clearTimeout(previewState.throttleTimer);
         previewState.throttleTimer = null;
+      }
+      // Wait for any in-flight flush before attempting final cleanup flush
+      if (previewState.flushInFlight && previewState.lastFlushPromise) {
+        await previewState.lastFlushPromise.catch(() => {});
       }
       // Final flush to ensure the preview card has the latest text
       if (streamCfg && !previewState.degraded && previewState.pendingText !== previewState.lastSentText) {
