@@ -175,6 +175,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     this.running = true;
 
+    // Preload members from all groups in the background (best-effort)
+    this.preloadAllChatMembers().catch(() => {});
+
     // WebSocket mode
     const dispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data) => {
@@ -277,12 +280,50 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   /**
+   * Preload members from all groups the bot is in (best-effort, runs in background).
+   * Ensures userNameCache is warm for cross-group name resolution (e.g. merge_forward).
+   */
+  protected async preloadAllChatMembers(): Promise<void> {
+    if (!this.restClient) return;
+    try {
+      let pageToken: string | undefined;
+      const chatIds: string[] = [];
+      do {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const resp: any = await this.restClient.im.chat.list({
+          params: {
+            page_size: 100,
+            ...(pageToken ? { page_token: pageToken } : {}),
+          },
+        });
+        const items = resp?.data?.items;
+        if (Array.isArray(items)) {
+          for (const chat of items) {
+            if (chat.chat_id) chatIds.push(chat.chat_id);
+          }
+        }
+        pageToken = resp?.data?.page_token || undefined;
+      } while (pageToken);
+
+      for (const chatId of chatIds) {
+        await this.loadChatMembers(chatId);
+      }
+      console.log(`[feishu-adapter] Preloaded members from ${chatIds.length} chats (${this.userNameCache.size} users cached)`);
+    } catch (err) {
+      console.warn('[feishu-adapter] Failed to preload chat members:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
    * Resolve a user's display name.
    * 1. Check cache (populated by loadChatMembers or previous lookups)
    * 2. Fall back to Contact API if available
    */
   private async resolveUserDisplayName(userId: string, chatId?: string): Promise<string | null> {
     if (!userId || !this.restClient) return null;
+
+    // Skip bot app_ids (cli_*) — not valid open_ids for Contact API
+    if (userId.startsWith('cli_')) return null;
 
     // Try loading chat members first if we haven't yet
     if (chatId && !this.membersCachedChats.has(chatId)) {
@@ -306,12 +347,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
           return name;
         }
       } catch (err) {
-        console.warn(
-          '[feishu-adapter] Contact API failed for userId:', userId,
-          '— disabling Contact API fallback.',
-          err instanceof Error ? err.message : err,
-        );
-        this.contactApiDisabled = true;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const errCode = (err as any)?.response?.data?.code ?? (err as any)?.code;
+        if (errCode === 41050 || errCode === 99992351) {
+          // Per-user permission issue — don't disable globally
+          console.warn('[feishu-adapter] Contact API: no authority for userId:', userId);
+        } else {
+          console.warn(
+            '[feishu-adapter] Contact API failed for userId:', userId,
+            '— disabling Contact API fallback.',
+            err instanceof Error ? err.message : err,
+          );
+          this.contactApiDisabled = true;
+        }
       }
     }
 
@@ -370,6 +418,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
         content = '[video]';
       } else if (msgType === 'sticker') {
         content = '[sticker]';
+      } else if (msgType === 'merge_forward') {
+        content = '[forwarded conversation]';
       } else if (msgType === 'interactive') {
         try {
           const parsed = JSON.parse(rawContent);
@@ -1046,6 +1096,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
         }
         // Don't add fallback text for individual post images — the text already carries context
       }
+    } else if (messageType === 'merge_forward') {
+      // Merged forwarded conversation — fetch sub-messages and concatenate (also in observe-only)
+      text = await this.parseMergeForward(msg.message_id, chatId);
     } else if (observeOnly) {
       // For observe-only messages, skip heavy file downloads — just record the type
       text = `[${messageType}]`;
@@ -1186,6 +1239,70 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return parsed.image_key || parsed.file_key || parsed.imageKey || parsed.fileKey || null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Fetch and format sub-messages of a merge_forward message.
+   * Uses GET /im/v1/messages/{message_id} which returns sub-messages
+   * with upper_message_id pointing to the parent merge_forward message.
+   */
+  private async parseMergeForward(messageId: string, chatId: string): Promise<string> {
+    if (!this.restClient) return '[forwarded conversation]';
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resp = await (this.restClient as any).im.message.get({
+        path: { message_id: messageId },
+      });
+
+      const items = resp?.data?.items;
+      if (!items || items.length === 0) return '[forwarded conversation (empty)]';
+
+      // Filter to sub-messages (those with upper_message_id matching the parent)
+      const subMessages = items.filter(
+        (item: any) => item.upper_message_id === messageId
+      );
+      if (subMessages.length === 0) return '[forwarded conversation (empty)]';
+
+      const lines: string[] = ['[Forwarded conversation]'];
+      for (const item of subMessages) {
+        const msgType: string = item.msg_type || '';
+        const rawContent: string = item.body?.content || '';
+        const senderId: string | undefined = item.sender?.id;
+
+        // Resolve sender name
+        let senderName = 'Unknown';
+        if (senderId && senderId.startsWith('cli_')) {
+          senderName = 'bot';
+        } else if (senderId) {
+          senderName = await this.resolveUserDisplayName(senderId, chatId) || senderId;
+        }
+
+        // Parse content by type
+        let content: string;
+        if (msgType === 'text') {
+          content = this.parseTextContent(rawContent);
+        } else if (msgType === 'post') {
+          const { extractedText } = this.parsePostContent(rawContent);
+          content = extractedText || '[post]';
+        } else if (msgType === 'image') {
+          content = '[image]';
+        } else if (msgType === 'file') {
+          try { content = `[file: ${JSON.parse(rawContent).file_name || 'unknown'}]`; } catch { content = '[file]'; }
+        } else if (msgType === 'merge_forward') {
+          content = '[nested forwarded conversation]';
+        } else {
+          content = `[${msgType}]`;
+        }
+
+        lines.push(`${senderName}: ${content}`);
+      }
+
+      return lines.join('\n');
+    } catch (err) {
+      console.error('[feishu-adapter] Failed to parse merge_forward:', err instanceof Error ? err.message : err);
+      return '[forwarded conversation (failed to load)]';
     }
   }
 

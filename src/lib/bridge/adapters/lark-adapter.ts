@@ -55,6 +55,9 @@ export class LarkAdapter extends FeishuAdapter {
 
     this.running = true;
 
+    // Preload members from all groups in the background (best-effort)
+    this.preloadAllChatMembers().catch(() => {});
+
     const verificationToken = this.setting('verification_token') || undefined;
     this.encryptKey = this.setting('encrypt_key') || undefined;
 
