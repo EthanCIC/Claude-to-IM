@@ -149,12 +149,15 @@ function flushPreview(
     ? state.pendingText.slice(0, config.maxChars) + '...'
     : state.pendingText;
 
-  state.lastSentText = text;
-  state.lastSentAt = Date.now();
+  // Don't update lastSentText/lastSentAt here — wait for PATCH confirmation (ETH-91 bug 2)
 
   const promise = adapter.sendPreview(state.chatId, text, state.draftId).then(result => {
     if (result === 'degrade') { state.degraded = true; return false; }
     if (result === 'skip') return false;
+    // PATCH confirmed — now safe to update tracking state
+    state.lastSentText = text;
+    state.lastSentAt = Date.now();
+    state.previewEverDelivered = true;
     return true; // 'sent'
   }).catch(() => false);
 
@@ -672,6 +675,7 @@ async function handleMessage(
       pendingText: '',
       textOffset: 0,
       lastFlushPromise: null,
+      previewEverDelivered: false,
     };
   }
 
@@ -779,16 +783,18 @@ async function handleMessage(
     // Send response text — render via channel-appropriate format.
     // If streaming preview was active and not degraded, the preview card already
     // contains the final text — skip the redundant deliverResponse.
-    // Await the last flush promise to confirm the preview was actually delivered,
-    // not just optimistically marked as sent. (ETH-80)
+    // Await the last flush promise to ensure the final card content is up to date,
+    // but use previewEverDelivered (not lastFlushOk) for the fallback decision.
+    // This prevents duplicate messages when finalizePreviewSegment clears
+    // lastFlushPromise at tool boundaries with no trailing text. (ETH-91)
     const lastFlushOk = previewState?.lastFlushPromise
       ? await previewState.lastFlushPromise
       : false;
-    const previewHandledDelivery = previewState && !previewState.degraded && lastFlushOk;
+    const previewHandledDelivery = previewState && !previewState.degraded && previewState.previewEverDelivered;
     if (previewHandledDelivery) {
       console.log(`[bridge-manager] Response delivered via streaming preview to ${msg.address.chatId}`);
-    } else if (previewState && !previewState.degraded && previewState.lastSentAt > 0 && !lastFlushOk) {
-      console.warn(`[bridge-manager] Streaming preview final flush failed for ${msg.address.chatId}, falling back to deliverResponse`);
+    } else if (previewState && !previewState.degraded && !previewState.previewEverDelivered) {
+      console.warn(`[bridge-manager] Streaming preview never delivered for ${msg.address.chatId}, falling back to deliverResponse`);
     }
     // Filter out Claude Code internal "no-op" responses that should never reach IM.
     // "No response requested." is a CLI convention (synthetic or LLM-generated) that

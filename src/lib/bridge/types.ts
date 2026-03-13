@@ -201,6 +201,8 @@ export interface StreamingPreviewState {
   textOffset: number;
   /** Promise from the most recent flushPreview call. Awaited before deciding fallback. */
   lastFlushPromise: Promise<boolean> | null;
+  /** True once any preview PATCH has been confirmed delivered. Survives segment resets. */
+  previewEverDelivered: boolean;
 }
 
 // ── Config ─────────────────────────────────────────────────────
