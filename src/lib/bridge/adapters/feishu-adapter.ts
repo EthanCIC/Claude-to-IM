@@ -380,8 +380,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     if (!this.restClient) return null;
     try {
-      const resp = await this.restClient.im.message.get({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resp = await (this.restClient as any).im.message.get({
         path: { message_id: parentId },
+        params: { card_msg_content_type: 'raw_card_content' },
       });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const item = (resp as any)?.data?.items?.[0];
@@ -421,12 +423,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
       } else if (msgType === 'merge_forward') {
         content = '[forwarded conversation]';
       } else if (msgType === 'interactive') {
-        try {
-          const parsed = JSON.parse(rawContent);
-          content = this.extractInteractiveText(parsed) || '[interactive]';
-        } catch {
-          content = '[interactive]';
-        }
+        // Try raw_card_content json_card first (schema 2.0 full content) (ETH-89)
+        content = this.extractCardContent(item) || '[interactive]';
       } else {
         content = `[${msgType || 'unknown'}]`;
       }
@@ -1254,6 +1252,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const resp = await (this.restClient as any).im.message.get({
         path: { message_id: messageId },
+        params: { card_msg_content_type: 'raw_card_content' },
       });
 
       const items = resp?.data?.items;
@@ -1292,6 +1291,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
           try { content = `[file: ${JSON.parse(rawContent).file_name || 'unknown'}]`; } catch { content = '[file]'; }
         } else if (msgType === 'merge_forward') {
           content = '[nested forwarded conversation]';
+        } else if (msgType === 'interactive') {
+          // Extract card content via raw_card_content (ETH-89)
+          content = this.extractCardContent(item) || '[interactive]';
         } else {
           content = `[${msgType}]`;
         }
@@ -1344,6 +1346,32 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     return { extractedText: textParts.join('').trim(), imageKeys };
+  }
+
+  /**
+   * Extract text content from an interactive card message item.
+   * Prefers raw_card_content json_card (schema 2.0), falls back to body.content (v1). (ETH-89)
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private extractCardContent(item: any): string | null {
+    // Try json_card from raw_card_content param (full schema 2.0)
+    const jsonCard = item.json_card;
+    if (jsonCard) {
+      try {
+        const card = typeof jsonCard === 'string' ? JSON.parse(jsonCard) : jsonCard;
+        const text = this.extractInteractiveText(card);
+        if (text) return text;
+      } catch { /* fall through */ }
+    }
+    // Fallback: parse body.content (v1 degraded format)
+    const rawContent: string = item.body?.content || '';
+    if (rawContent) {
+      try {
+        const parsed = JSON.parse(rawContent);
+        return this.extractInteractiveText(parsed) || null;
+      } catch { /* fall through */ }
+    }
+    return null;
   }
 
   /**
