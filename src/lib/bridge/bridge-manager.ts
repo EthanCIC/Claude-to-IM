@@ -38,7 +38,6 @@ const OBSERVE_BUFFER_MAX = 50;
 /** Per-chat buffer of observe-only messages (group chats without @mention). */
 interface ObserveEntry {
   text: string;
-  attachments?: FileAttachment[];
 }
 const observeBuffers = new Map<string, ObserveEntry[]>();
 
@@ -46,7 +45,7 @@ const observeBuffers = new Map<string, ObserveEntry[]>();
  * Add an observe-only message to the per-chat buffer.
  * Format: "[Name] text" or "[userId] text" if no display name.
  */
-function bufferObserveMessage(chatId: string, displayName: string | undefined, userId: string | undefined, text: string, attachments?: FileAttachment[]): void {
+function bufferObserveMessage(chatId: string, displayName: string | undefined, userId: string | undefined, text: string): void {
   const label = displayName || userId || 'unknown';
   const line = `[${label}] ${text}`;
   let buf = observeBuffers.get(chatId);
@@ -54,7 +53,7 @@ function bufferObserveMessage(chatId: string, displayName: string | undefined, u
     buf = [];
     observeBuffers.set(chatId, buf);
   }
-  buf.push({ text: line, attachments });
+  buf.push({ text: line });
   // Ring buffer: drop oldest when full
   if (buf.length > OBSERVE_BUFFER_MAX) {
     buf.splice(0, buf.length - OBSERVE_BUFFER_MAX);
@@ -65,13 +64,12 @@ function bufferObserveMessage(chatId: string, displayName: string | undefined, u
  * Drain and return all buffered observe messages for a chat.
  * Returns null if buffer is empty.
  */
-function drainObserveBuffer(chatId: string): { text: string; attachments: FileAttachment[] } | null {
+function drainObserveBuffer(chatId: string): string | null {
   const buf = observeBuffers.get(chatId);
   if (!buf || buf.length === 0) return null;
   const text = buf.map(e => e.text).join('\n');
-  const attachments = buf.flatMap(e => e.attachments || []);
   observeBuffers.delete(chatId);
-  return { text, attachments };
+  return text;
 }
 
 function hasObserveBuffer(chatId: string): boolean {
@@ -588,7 +586,7 @@ async function handleMessage(
 
   // Observe-only messages: buffer for context, don't trigger LLM
   if (msg.observeOnly) {
-    bufferObserveMessage(msg.address.chatId, msg.address.displayName, msg.address.userId, msg.text.trim(), msg.attachments);
+    bufferObserveMessage(msg.address.chatId, msg.address.displayName, msg.address.userId, msg.text.trim());
     ack();
     return;
   }
@@ -735,16 +733,13 @@ async function handleMessage(
     const rawPrompt = text || (hasAttachments ? 'Describe this image.' : '');
 
     // Prepend buffered observe-only messages as group chat context
-    const observeDrain = drainObserveBuffer(msg.address.chatId);
-    const contextPrefix = observeDrain
-      ? `[Recent group messages]\n${observeDrain.text}\n\n`
+    const observeText = drainObserveBuffer(msg.address.chatId);
+    const contextPrefix = observeText
+      ? `[Recent group messages]\n${observeText}\n\n`
       : '';
 
-    // Merge observe-only attachments (e.g. images from non-@bot messages) with current message attachments
-    const allAttachments: FileAttachment[] = [
-      ...(observeDrain?.attachments || []),
-      ...(hasAttachments ? msg.attachments! : []),
-    ];
+    // Observe attachments are now disk-first (paths in text), only current message has inline attachments
+    const allAttachments: FileAttachment[] = hasAttachments ? msg.attachments! : [];
 
     // Prefix the prompt with sender identity so the LLM always knows who is speaking
     const senderPrefix = msg.address.displayName

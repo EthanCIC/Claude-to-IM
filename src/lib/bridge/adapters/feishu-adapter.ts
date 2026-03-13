@@ -392,6 +392,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const msgType: string = item.msg_type || '';
       const rawContent: string = item.body?.content || '';
       const senderId: string | undefined = item.sender?.id;
+      console.log('[feishu-adapter] fetchQuotedContent: msgType:', msgType, 'contentLen:', rawContent.length, 'msgId:', parentId);
 
       // Parse message content based on type
       let content: string;
@@ -424,6 +425,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         content = '[forwarded conversation]';
       } else if (msgType === 'interactive') {
         // Try raw_card_content json_card first (schema 2.0 full content) (ETH-89)
+        console.log('[feishu-adapter] fetchQuotedContent: interactive card, msgId:', parentId);
         content = this.extractCardContent(item) || '[interactive]';
       } else {
         content = `[${msgType || 'unknown'}]`;
@@ -1054,6 +1056,16 @@ export class FeishuAdapter extends BaseChannelAdapter {
       this.lastIncomingMessageId.set(chatId, msg.message_id);
     }
 
+    // Resolve timestamp and sender name early — needed by disk-first download for filenames
+    const timestamp = parseInt(msg.create_time, 10) || Date.now();
+    let displayName: string | undefined;
+    if (userId) {
+      const name = await this.resolveUserDisplayName(userId, chatId)
+        || this.extractSenderNameFromMentions(msg.mentions, userId)
+        || undefined;
+      if (name) displayName = name;
+    }
+
     // Extract content based on message type
     const messageType = msg.message_type;
     let text = '';
@@ -1062,46 +1074,58 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (messageType === 'text') {
       text = this.parseTextContent(msg.content);
     } else if (messageType === 'image') {
-      // [P1] Download image with failure fallback (also in observe-only for visual context)
       console.log('[feishu-adapter] Image message received, content:', msg.content);
       const fileKey = this.extractFileKey(msg.content);
       console.log('[feishu-adapter] Extracted fileKey:', fileKey);
       if (fileKey) {
-        const attachment = await this.downloadResource(msg.message_id, fileKey, 'image');
-        if (attachment) {
-          attachments.push(attachment);
+        if (observeOnly) {
+          // Disk-first: download to file, store path in text
+          const destDir = this.resolveUploadDir(chatId);
+          const result = await this.downloadResourceToDisk(msg.message_id, fileKey, 'image', destDir, displayName || userId || 'unknown', timestamp);
+          text = result
+            ? `sent a photo [image: ${result.filePath}]`
+            : '[image download failed]';
         } else {
-          text = '[image download failed]';
-          try {
-            getBridgeContext().store.insertAuditLog({
-              channelType: this.channelType,
-              chatId,
-              direction: 'inbound',
-              messageId: msg.message_id,
-              summary: `[ERROR] Image download failed for key: ${fileKey}`,
-            });
-          } catch { /* best effort */ }
+          const attachment = await this.downloadResource(msg.message_id, fileKey, 'image');
+          if (attachment) {
+            attachments.push(attachment);
+          } else {
+            text = '[image download failed]';
+            try {
+              getBridgeContext().store.insertAuditLog({
+                channelType: this.channelType,
+                chatId,
+                direction: 'inbound',
+                messageId: msg.message_id,
+                summary: `[ERROR] Image download failed for key: ${fileKey}`,
+              });
+            } catch { /* best effort */ }
+          }
         }
       }
     } else if (messageType === 'post') {
-      // [P2] Extract text and image keys from rich text (post) messages (also in observe-only)
       const { extractedText, imageKeys } = this.parsePostContent(msg.content);
       text = extractedText;
-      for (const key of imageKeys) {
-        const attachment = await this.downloadResource(msg.message_id, key, 'image');
-        if (attachment) {
-          attachments.push(attachment);
+      if (observeOnly) {
+        // Disk-first: download post images to file, append paths to text
+        const destDir = this.resolveUploadDir(chatId);
+        for (const key of imageKeys) {
+          const result = await this.downloadResourceToDisk(msg.message_id, key, 'image', destDir, displayName || userId || 'unknown', timestamp);
+          if (result) {
+            text += ` [image: ${result.filePath}]`;
+          }
         }
-        // Don't add fallback text for individual post images — the text already carries context
+      } else {
+        for (const key of imageKeys) {
+          const attachment = await this.downloadResource(msg.message_id, key, 'image');
+          if (attachment) {
+            attachments.push(attachment);
+          }
+        }
       }
     } else if (messageType === 'merge_forward') {
-      // Merged forwarded conversation — fetch sub-messages and concatenate (also in observe-only)
       text = await this.parseMergeForward(msg.message_id, chatId);
-    } else if (observeOnly) {
-      // For observe-only messages, skip heavy file downloads — just record the type
-      text = `[${messageType}]`;
     } else if (messageType === 'file' || messageType === 'audio' || messageType === 'video' || messageType === 'media') {
-      // [P2] Support file/audio/video/media downloads
       const fileKey = this.extractFileKey(msg.content);
       if (fileKey) {
         const resourceType = messageType === 'audio' || messageType === 'video' || messageType === 'media'
@@ -1109,20 +1133,29 @@ export class FeishuAdapter extends BaseChannelAdapter {
           : 'file';
         let fileName: string | undefined;
         try { fileName = JSON.parse(msg.content).file_name; } catch { /* ignore */ }
-        const attachment = await this.downloadResource(msg.message_id, fileKey, resourceType, fileName);
-        if (attachment) {
-          attachments.push(attachment);
+        if (observeOnly) {
+          // Disk-first: download to file, store path in text
+          const destDir = this.resolveUploadDir(chatId);
+          const result = await this.downloadResourceToDisk(msg.message_id, fileKey, resourceType, destDir, displayName || userId || 'unknown', timestamp, fileName);
+          text = result
+            ? `sent a ${messageType} [${messageType}: ${result.filePath}]`
+            : `[${messageType} download failed]`;
         } else {
-          text = `[${messageType} download failed]`;
-          try {
-            getBridgeContext().store.insertAuditLog({
-              channelType: this.channelType,
-              chatId,
-              direction: 'inbound',
-              messageId: msg.message_id,
-              summary: `[ERROR] ${messageType} download failed for key: ${fileKey}`,
-            });
-          } catch { /* best effort */ }
+          const attachment = await this.downloadResource(msg.message_id, fileKey, resourceType, fileName);
+          if (attachment) {
+            attachments.push(attachment);
+          } else {
+            text = `[${messageType} download failed]`;
+            try {
+              getBridgeContext().store.insertAuditLog({
+                channelType: this.channelType,
+                chatId,
+                direction: 'inbound',
+                messageId: msg.message_id,
+                summary: `[ERROR] ${messageType} download failed for key: ${fileKey}`,
+              });
+            } catch { /* best effort */ }
+          }
         }
       }
     } else {
@@ -1135,6 +1168,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     text = this.resolveMentionMarkers(text, msg.mentions);
 
     // Fetch quoted message content if this is a reply
+    console.log('[feishu-adapter] parent_id:', msg.parent_id, 'root_id:', msg.root_id, 'msgId:', msg.message_id);
     if (msg.parent_id) {
       const quoted = await this.fetchQuotedContent(msg.parent_id, chatId);
       if (quoted) {
@@ -1143,17 +1177,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     if (!text.trim() && attachments.length === 0 && !isGroup) return;
-
-    const timestamp = parseInt(msg.create_time, 10) || Date.now();
-
-    // Resolve sender display name (for audit trail, memory, and group chat identity)
-    let displayName: string | undefined;
-    if (userId) {
-      const name = await this.resolveUserDisplayName(userId, chatId)
-        || this.extractSenderNameFromMentions(msg.mentions, userId)
-        || undefined;
-      if (name) displayName = name;
-    }
 
     const address = {
       channelType: this.channelType,
@@ -1357,21 +1380,26 @@ export class FeishuAdapter extends BaseChannelAdapter {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private extractCardContent(item: any): string | null {
     const rawContent: string = item.body?.content || '';
-    if (!rawContent) return null;
+    if (!rawContent) { console.log('[feishu-adapter] extractCardContent: no body.content'); return null; }
 
     try {
       const parsed = JSON.parse(rawContent);
+      console.log('[feishu-adapter] extractCardContent: body.content keys:', Object.keys(parsed), 'has json_card:', !!parsed.json_card);
 
       // raw_card_content wraps json_card inside body.content
       if (parsed.json_card) {
         const card = typeof parsed.json_card === 'string' ? JSON.parse(parsed.json_card) : parsed.json_card;
+        console.log('[feishu-adapter] extractCardContent: json_card keys:', Object.keys(card));
         const text = this.extractInteractiveText(card);
+        console.log('[feishu-adapter] extractCardContent: extracted text length:', text?.length, 'preview:', text?.slice(0, 100));
         if (text) return text;
       }
 
       // Fallback: v1 degraded format (elements array directly in body.content)
-      return this.extractInteractiveText(parsed) || null;
-    } catch { return null; }
+      const v1text = this.extractInteractiveText(parsed) || null;
+      console.log('[feishu-adapter] extractCardContent: v1 fallback result:', v1text?.slice(0, 100));
+      return v1text;
+    } catch (e) { console.log('[feishu-adapter] extractCardContent: parse error:', e); return null; }
   }
 
   /**
@@ -1642,6 +1670,127 @@ export class FeishuAdapter extends BaseChannelAdapter {
     } catch (err) {
       console.error(
         `[feishu-adapter] Resource download failed (type=${resourceType}, key=${fileKey}):`,
+        err instanceof Error ? err.stack || err.message : err,
+      );
+      return null;
+    }
+  }
+
+  // ── Disk-first resource download (observe mode) ────────────
+
+  /**
+   * Resolve the upload directory for a given chat.
+   * Uses the channel binding's workingDirectory, falls back to bridge_default_work_dir or $HOME.
+   */
+  private resolveUploadDir(chatId: string): string {
+    const { store } = getBridgeContext();
+    const binding = store.getChannelBinding(this.channelType, chatId);
+    const baseDir = binding?.workingDirectory
+      || store.getSetting('bridge_default_work_dir')
+      || process.env.HOME
+      || '';
+    return `${baseDir}/.codepilot-uploads`;
+  }
+
+  /**
+   * Download a resource directly to disk (no base64 intermediary).
+   * Returns file metadata on success, null on failure.
+   */
+  private async downloadResourceToDisk(
+    messageId: string,
+    fileKey: string,
+    resourceType: string,
+    destDir: string,
+    senderName: string,
+    timestamp: number,
+    fileName?: string,
+  ): Promise<{ filePath: string; name: string; mimeType: string; size: number } | null> {
+    if (!this.restClient) return null;
+
+    const fs = await import('fs');
+    const path = await import('path');
+
+    try {
+      console.log(`[feishu-adapter] Downloading resource to disk: type=${resourceType}, key=${fileKey}, msgId=${messageId}`);
+
+      // Ensure dest dir exists
+      fs.mkdirSync(destDir, { recursive: true });
+
+      const res = await this.restClient.im.messageResource.get({
+        path: { message_id: messageId, file_key: fileKey },
+        params: { type: resourceType === 'image' ? 'image' : 'file' },
+      });
+
+      if (!res) {
+        console.warn('[feishu-adapter] messageResource.get returned null/undefined');
+        return null;
+      }
+
+      // Build filename: YYYYMMDD-HHmmss-sender-originalName
+      const d = new Date(timestamp);
+      const ts = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
+      const safeSender = senderName.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20) || 'unknown';
+      const fallbackExt = resourceType === 'image' ? 'png'
+        : resourceType === 'audio' ? 'ogg'
+        : resourceType === 'video' ? 'mp4'
+        : 'bin';
+      const resolvedName = fileName || `${fileKey}.${fallbackExt}`;
+      const destPath = path.join(destDir, `${ts}-${safeSender}-${resolvedName}`);
+
+      // Stream to disk with size guard
+      let totalSize = 0;
+      try {
+        const readable = res.getReadableStream();
+        const writeStream = fs.createWriteStream(destPath);
+        for await (const chunk of readable) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          totalSize += buf.length;
+          if (totalSize > MAX_FILE_SIZE) {
+            writeStream.destroy();
+            try { fs.unlinkSync(destPath); } catch { /* cleanup */ }
+            console.warn(`[feishu-adapter] Resource too large (>${MAX_FILE_SIZE} bytes), key: ${fileKey}`);
+            return null;
+          }
+          writeStream.write(buf);
+        }
+        await new Promise<void>((resolve, reject) => {
+          writeStream.end(() => resolve());
+          writeStream.on('error', reject);
+        });
+      } catch (streamErr) {
+        // Fallback: writeFile to temp, then rename
+        console.warn('[feishu-adapter] Stream write failed, falling back to writeFile:', streamErr instanceof Error ? streamErr.message : streamErr);
+        const os = await import('os');
+        const tmpPath = path.join(os.tmpdir(), `feishu-dl-${crypto.randomUUID()}`);
+        try {
+          await res.writeFile(tmpPath);
+          const stat = fs.statSync(tmpPath);
+          if (stat.size > MAX_FILE_SIZE) {
+            console.warn(`[feishu-adapter] Resource too large (>${MAX_FILE_SIZE} bytes), key: ${fileKey}`);
+            return null;
+          }
+          totalSize = stat.size;
+          fs.renameSync(tmpPath, destPath);
+        } finally {
+          try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        }
+      }
+
+      if (totalSize === 0) {
+        try { fs.unlinkSync(destPath); } catch { /* ignore */ }
+        console.warn('[feishu-adapter] Downloaded resource is empty, key:', fileKey);
+        return null;
+      }
+
+      const extFromName = resolvedName.includes('.') ? resolvedName.split('.').pop()! : fallbackExt;
+      const mimeType = MIME_BY_EXT[extFromName] || MIME_BY_TYPE[resourceType] || 'application/octet-stream';
+
+      console.log(`[feishu-adapter] Resource saved to disk: ${destPath} (${totalSize} bytes)`);
+
+      return { filePath: destPath, name: resolvedName, mimeType, size: totalSize };
+    } catch (err) {
+      console.error(
+        `[feishu-adapter] Resource disk download failed (type=${resourceType}, key=${fileKey}):`,
         err instanceof Error ? err.stack || err.message : err,
       );
       return null;
