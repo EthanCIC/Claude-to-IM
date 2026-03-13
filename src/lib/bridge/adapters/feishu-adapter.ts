@@ -1350,28 +1350,28 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   /**
    * Extract text content from an interactive card message item.
-   * Prefers raw_card_content json_card (schema 2.0), falls back to body.content (v1). (ETH-89)
+   * With raw_card_content param, json_card is inside body.content (not at item level).
+   * Structure: item.body.content → JSON → { json_card: string, card_schema: number }
+   * Falls back to v1 extractInteractiveText if json_card not found. (ETH-89)
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private extractCardContent(item: any): string | null {
-    // Try json_card from raw_card_content param (full schema 2.0)
-    const jsonCard = item.json_card;
-    if (jsonCard) {
-      try {
-        const card = typeof jsonCard === 'string' ? JSON.parse(jsonCard) : jsonCard;
+    const rawContent: string = item.body?.content || '';
+    if (!rawContent) return null;
+
+    try {
+      const parsed = JSON.parse(rawContent);
+
+      // raw_card_content wraps json_card inside body.content
+      if (parsed.json_card) {
+        const card = typeof parsed.json_card === 'string' ? JSON.parse(parsed.json_card) : parsed.json_card;
         const text = this.extractInteractiveText(card);
         if (text) return text;
-      } catch { /* fall through */ }
-    }
-    // Fallback: parse body.content (v1 degraded format)
-    const rawContent: string = item.body?.content || '';
-    if (rawContent) {
-      try {
-        const parsed = JSON.parse(rawContent);
-        return this.extractInteractiveText(parsed) || null;
-      } catch { /* fall through */ }
-    }
-    return null;
+      }
+
+      // Fallback: v1 degraded format (elements array directly in body.content)
+      return this.extractInteractiveText(parsed) || null;
+    } catch { return null; }
   }
 
   /**
@@ -1402,12 +1402,18 @@ export class FeishuAdapter extends BaseChannelAdapter {
       }
       const obj = node as Record<string, unknown>;
       const tag = obj.tag as string | undefined;
+      // raw_card_content nests content inside `property` (ETH-89)
+      const prop = obj.property as Record<string, unknown> | undefined;
 
-      // Text elements (both Card v1 `text` field and Card v2 `content` field)
+      // Text elements — check both direct fields and property-wrapped fields
+      const directContent = typeof obj.content === 'string' ? obj.content : null;
+      const propContent = prop && typeof prop.content === 'string' ? prop.content : null;
+      const content = directContent || propContent;
+
       if (tag === 'text' && typeof obj.text === 'string' && obj.text.trim()) {
         parts.push(obj.text);
-      } else if ((tag === 'plain_text' || tag === 'lark_md' || tag === 'markdown') && typeof obj.content === 'string' && obj.content.trim()) {
-        parts.push(obj.content);
+      } else if ((tag === 'plain_text' || tag === 'lark_md' || tag === 'markdown' || tag === 'code_span') && content?.trim()) {
+        parts.push(content);
       } else if (tag === 'div') {
         if (obj.text) walk(obj.text);
         if (obj.extra) walk(obj.extra);
@@ -1416,16 +1422,22 @@ export class FeishuAdapter extends BaseChannelAdapter {
         if (obj.elements) walk(obj.elements);
       } else if (tag === 'img') {
         parts.push('[image]');
+      } else if (tag === 'br') {
+        // Line break in raw_card_content — skip
       }
 
-      // Recurse into elements/body
+      // Recurse into elements/body — check both direct and property-wrapped
       if (obj.elements) walk(obj.elements);
+      if (prop?.elements) walk(prop.elements);
       if (obj.body && typeof obj.body === 'object') {
-        walk((obj.body as Record<string, unknown>).elements);
+        const body = obj.body as Record<string, unknown>;
+        walk(body.elements);
+        // raw_card_content wraps body elements in property
+        if (body.property) walk((body.property as Record<string, unknown>).elements);
       }
     };
 
-    walk(card.elements || card.body);
+    walk(card.elements || card.body || card.newBody);
     return parts.join('\n').trim();
   }
 
