@@ -411,7 +411,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           content = rawContent;
         }
       } else if (msgType === 'post') {
-        const { extractedText } = this.parsePostContent(rawContent);
+        const { extractedText } = this.parsePostContent(rawContent, item.mentions);
         content = extractedText || '[post]';
       } else if (msgType === 'image') {
         content = '[image]';
@@ -1346,7 +1346,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         if (msgType === 'text') {
           content = this.parseTextContent(rawContent);
         } else if (msgType === 'post') {
-          const { extractedText } = this.parsePostContent(rawContent);
+          const { extractedText } = this.parsePostContent(rawContent, item.mentions);
           content = extractedText || '[post]';
         } else if (msgType === 'image') {
           content = '[image]';
@@ -1377,7 +1377,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
    */
   private parsePostContent(
     content: string,
-    mentions?: FeishuMessageEventData['message']['mentions'],
+    mentions?: FeishuMessageEventData['message']['mentions'] | Array<{ key: string; id: string; name: string }>,
   ): { extractedText: string; imageKeys: string[] } {
     const imageKeys: string[] = [];
     const textParts: string[] = [];
@@ -1399,10 +1399,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
               textParts.push(element.text);
             } else if (element.tag === 'at') {
               // Resolve mention name from mentions array or element metadata
+              // Supports both WebSocket event format ({ id: { open_id } }) and API response format ({ id: string })
               const userId = element.user_id;
-              const matched = mentions?.find(m =>
-                m.id.open_id === userId || m.id.user_id === userId || m.id.union_id === userId
-              );
+              const matched = mentions?.find(m => {
+                const mid = m.id;
+                if (typeof mid === 'string') return mid === userId;
+                return mid.open_id === userId || mid.user_id === userId || mid.union_id === userId;
+              });
               if (matched?.name) {
                 textParts.push(`@${matched.name}`);
               } else if (element.user_name) {
