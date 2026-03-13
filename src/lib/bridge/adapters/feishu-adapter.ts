@@ -1315,22 +1315,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!this.restClient) return '[forwarded conversation]';
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const resp = await (this.restClient as any).im.message.get({
-        path: { message_id: messageId },
-        params: { card_msg_content_type: 'raw_card_content' },
-      });
-
-      const items = resp?.data?.items;
-      if (!items || items.length === 0) return '[forwarded conversation (empty)]';
-
-      // Filter to sub-messages (those with upper_message_id matching the parent)
-      const subMessages = items.filter(
-        (item: any) => item.upper_message_id === messageId
-      );
+      const subMessages = await this.fetchMergeForwardItems(messageId);
       if (subMessages.length === 0) return '[forwarded conversation (empty)]';
 
+      // Log all sub-message types for diagnostic (ETH-96)
+      console.log(`[feishu-adapter] parseMergeForward: ${subMessages.length} sub-messages, types: [${subMessages.map((m: any) => m.msg_type).join(', ')}]`);
+
       const lines: string[] = ['[Forwarded conversation]'];
+      let hasFailedCards = false;
+
       for (const item of subMessages) {
         const msgType: string = item.msg_type || '';
         const rawContent: string = item.body?.content || '';
@@ -1360,6 +1353,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
         } else if (msgType === 'interactive') {
           // Extract card content via raw_card_content (ETH-89)
           content = this.extractCardContent(item) || '[interactive]';
+          if (content === '[interactive]') {
+            hasFailedCards = true;
+            console.warn(`[feishu-adapter] parseMergeForward: interactive card extraction FAILED, msg_id: ${item.message_id}, body keys: ${item.body ? Object.keys(item.body) : 'no body'}, raw (200 chars): ${rawContent.slice(0, 200)}`);
+          }
         } else {
           content = `[${msgType}]`;
         }
@@ -1367,11 +1364,44 @@ export class FeishuAdapter extends BaseChannelAdapter {
         lines.push(`${senderName}: ${content}`);
       }
 
+      // Retry once if any interactive cards failed — Lark API returns
+      // inconsistent card content non-deterministically (ETH-96)
+      if (hasFailedCards) {
+        console.log('[feishu-adapter] parseMergeForward: retrying GET due to failed card extractions');
+        await new Promise(r => setTimeout(r, 300));
+        const retryItems = await this.fetchMergeForwardItems(messageId);
+        // Same forward → same order. Patch failed cards by index.
+        for (let i = 0; i < subMessages.length && i < retryItems.length; i++) {
+          if (subMessages[i].msg_type !== 'interactive') continue;
+          if (!lines[i + 1]?.includes('[interactive]')) continue; // already OK
+          if (retryItems[i]?.msg_type !== 'interactive') continue;
+          const retried = this.extractCardContent(retryItems[i]);
+          if (retried) {
+            const senderPart = lines[i + 1].split(': ')[0];
+            lines[i + 1] = `${senderPart}: ${retried}`;
+            console.log(`[feishu-adapter] parseMergeForward: retry recovered card, length: ${retried.length}`);
+          }
+        }
+      }
+
       return lines.join('\n');
     } catch (err) {
       console.error('[feishu-adapter] Failed to parse merge_forward:', err instanceof Error ? err.message : err);
       return '[forwarded conversation (failed to load)]';
     }
+  }
+
+  /** Fetch sub-messages of a merge_forward message via im.message.get. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async fetchMergeForwardItems(messageId: string): Promise<any[]> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const resp = await (this.restClient as any).im.message.get({
+      path: { message_id: messageId },
+      params: { card_msg_content_type: 'raw_card_content' },
+    });
+    const items = resp?.data?.items;
+    if (!items || items.length === 0) return [];
+    return items.filter((item: any) => item.upper_message_id === messageId);
   }
 
   /**
