@@ -140,6 +140,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
   /** Cache: messageId → final text content for bot-sent messages (for quote resolution). */
   private botMessageContentCache = new Map<string, string>();
   private static readonly BOT_CONTENT_CACHE_MAX = 200;
+  /** Timestamp of the last PATCH sent (across all sessions) for global rate limiting. */
+  private lastPatchAt = 0;
+  /** Minimum interval (ms) between PATCHes across all sessions to reduce API rate limit collisions. */
+  private static readonly MIN_PATCH_INTERVAL = 200;
+  /** Max retry attempts for rate-limited PATCHes. */
+  private static readonly PATCH_MAX_RETRIES = 2;
 
   protected setting(key: string): string {
     return getBridgeContext().store.getSetting(`bridge_${this.channelType}_${key}`) || '';
@@ -229,6 +235,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.botMessageContentCache.clear();
     this.userNameCache.clear();
     this.contactApiDisabled = false;
+    this.lastPatchAt = 0;
 
     console.log('[feishu-adapter] Stopped');
   }
@@ -557,6 +564,41 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return { supported: true, privateOnly: false };
   }
 
+  /**
+   * PATCH a preview card with global throttle + retry on rate limit (230020).
+   * Enforces MIN_PATCH_INTERVAL between PATCHes across all sessions to reduce
+   * API rate limit collisions, and retries up to PATCH_MAX_RETRIES times.
+   */
+  private async patchPreviewCard(messageId: string, cardJson: string): Promise<void> {
+    for (let attempt = 0; attempt <= FeishuAdapter.PATCH_MAX_RETRIES; attempt++) {
+      // Global throttle: wait if another PATCH was sent too recently
+      const elapsed = Date.now() - this.lastPatchAt;
+      if (elapsed < FeishuAdapter.MIN_PATCH_INTERVAL) {
+        await new Promise(r => setTimeout(r, FeishuAdapter.MIN_PATCH_INTERVAL - elapsed));
+      }
+      this.lastPatchAt = Date.now();
+
+      try {
+        await this.restClient!.im.message.patch({
+          path: { message_id: messageId },
+          data: { content: cardJson },
+        });
+        return; // success
+      } catch (err) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const code = (err as any)?.code;
+        if (code === 230020 && attempt < FeishuAdapter.PATCH_MAX_RETRIES) {
+          // Rate limited — backoff and retry
+          const backoff = 300 * (attempt + 1);
+          console.warn(`[feishu-adapter] PATCH rate limited (230020), retry ${attempt + 1} in ${backoff}ms`);
+          await new Promise(r => setTimeout(r, backoff));
+          continue;
+        }
+        throw err; // re-throw for caller to handle
+      }
+    }
+  }
+
   async sendPreview(chatId: string, text: string, _draftId: number): Promise<'sent' | 'skip' | 'degrade'> {
     if (!this.restClient) return 'skip';
 
@@ -578,11 +620,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     try {
       if (existingMsgId) {
-        // Update existing preview card via PATCH
-        await this.restClient.im.message.patch({
-          path: { message_id: existingMsgId },
-          data: { content: cardJson },
-        });
+        // Update existing preview card via PATCH (with retry + global throttle)
+        await this.patchPreviewCard(existingMsgId, cardJson);
         // Cache latest text for quote resolution (PATCH doesn't update im.message.get)
         this.cacheBotMessageContent(existingMsgId, text);
         return 'sent';
@@ -622,10 +661,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
             if (queued) {
               this.previewQueuedUpdate.delete(chatId);
               try {
-                await this.restClient.im.message.patch({
-                  path: { message_id: res.data.message_id },
-                  data: { content: queued },
-                });
+                await this.patchPreviewCard(res.data.message_id, queued);
               } catch { /* best effort — card at least has the initial content */ }
             }
             return 'sent';
@@ -645,7 +681,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         this.previewDegraded.add(chatId);
         return 'degrade';
       }
-      // Transient (rate limit, network) — skip this update
+      // Transient (rate limit after retries, network) — skip this update
       return 'skip';
     }
   }
