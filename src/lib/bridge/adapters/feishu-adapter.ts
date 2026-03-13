@@ -1126,7 +1126,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     } else if (messageType === 'merge_forward') {
       text = await this.parseMergeForward(msg.message_id, chatId);
     } else if (messageType === 'file' || messageType === 'audio' || messageType === 'video' || messageType === 'media') {
-      const fileKey = this.extractFileKey(msg.content);
+      const fileKey = this.extractFileKey(msg.content, messageType);
       if (fileKey) {
         const resourceType = messageType === 'audio' || messageType === 'video' || messageType === 'media'
           ? messageType
@@ -1254,9 +1254,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Extract file key from message content JSON.
    * Handles multiple key names: image_key, file_key, imageKey, fileKey.
    */
-  private extractFileKey(content: string): string | null {
+  private extractFileKey(content: string, messageType?: string): string | null {
     try {
       const parsed = JSON.parse(content);
+      // For video/media, prefer file_key (actual video) over image_key (thumbnail)
+      if (messageType === 'video' || messageType === 'media') {
+        return parsed.file_key || parsed.fileKey || parsed.image_key || parsed.imageKey || null;
+      }
       return parsed.image_key || parsed.file_key || parsed.imageKey || parsed.fileKey || null;
     } catch {
       return null;
