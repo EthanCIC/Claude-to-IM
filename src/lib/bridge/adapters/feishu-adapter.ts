@@ -1104,7 +1104,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         }
       }
     } else if (messageType === 'post') {
-      const { extractedText, imageKeys } = this.parsePostContent(msg.content);
+      const { extractedText, imageKeys } = this.parsePostContent(msg.content, msg.mentions);
       text = extractedText;
       if (observeOnly) {
         // Disk-first: download post images to file, append paths to text
@@ -1335,7 +1335,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
    * Parse rich text (post) content.
    * Extracts plain text from text elements and image keys from img elements.
    */
-  private parsePostContent(content: string): { extractedText: string; imageKeys: string[] } {
+  private parsePostContent(
+    content: string,
+    mentions?: FeishuMessageEventData['message']['mentions'],
+  ): { extractedText: string; imageKeys: string[] } {
     const imageKeys: string[] = [];
     const textParts: string[] = [];
 
@@ -1354,8 +1357,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
               textParts.push(element.text);
             } else if (element.tag === 'a' && element.text) {
               textParts.push(element.text);
-            } else if (element.tag === 'at' && element.user_id) {
-              // Mention in post — handled by isBotMentioned for group policy
+            } else if (element.tag === 'at') {
+              // Resolve mention name from mentions array or element metadata
+              const userId = element.user_id;
+              const matched = mentions?.find(m =>
+                m.id.open_id === userId || m.id.user_id === userId || m.id.union_id === userId
+              );
+              if (matched?.name) {
+                textParts.push(`@${matched.name}`);
+              } else if (element.user_name) {
+                textParts.push(`@${element.user_name}`);
+              } else if (userId === 'all') {
+                textParts.push('@all');
+              } else {
+                textParts.push('@[user]');
+              }
             } else if (element.tag === 'img') {
               const key = element.image_key || element.file_key || element.imageKey;
               if (key) imageKeys.push(key);
@@ -1555,7 +1571,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     mentions?: FeishuMessageEventData['message']['mentions'],
   ): string {
     if (!mentions || mentions.length === 0) {
-      return text.replace(/@_user_\d+/g, '').trim();
+      return text.replace(/@_user_\d+/g, '@[user]').trim();
     }
     // Replace all @_user_N placeholders with actual names to preserve semantics
     for (const m of mentions) {
@@ -1563,8 +1579,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
         text = text.replace(m.key, `@${m.name}`);
       }
     }
-    // Clean up any unresolved placeholders (shouldn't happen, but just in case)
-    return text.replace(/@_user_\d+/g, '').trim();
+    // Replace any unresolved placeholders with visible marker instead of silent strip
+    return text.replace(/@_user_\d+/g, '@[user]').trim();
   }
 
   // ── Resource download ───────────────────────────────────────
