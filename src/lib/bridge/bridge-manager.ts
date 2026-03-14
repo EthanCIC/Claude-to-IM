@@ -136,7 +136,8 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
 /** Fire-and-forget: send a preview draft. Only degrades on permanent failure.
  *  Stores the resulting Promise on state.lastFlushPromise so the final flush
  *  can be awaited before deciding whether to fall back to deliverResponse.
- *  Uses flushInFlight to prevent concurrent PATCHes from the same session. */
+ *  Uses flushInFlight to prevent concurrent PATCHes from the same session.
+ *  Uses generation guard to prevent stale callbacks from corrupting state (ETH-98). */
 function flushPreview(
   adapter: BaseChannelAdapter,
   state: StreamingPreviewState,
@@ -151,17 +152,27 @@ function flushPreview(
 
   // Don't update lastSentText/lastSentAt here — wait for PATCH confirmation (ETH-91 bug 2)
   state.flushInFlight = true;
+  const gen = state.generation; // Capture generation to detect segment resets (ETH-98)
 
   const promise = adapter.sendPreview(state.chatId, text, state.draftId).then(result => {
-    state.flushInFlight = false;
+    // Only update state if we're still in the same segment (ETH-98).
+    // If finalizePreviewSegment ran while this was in-flight, generation
+    // will have incremented and we must not overwrite the new segment's state.
+    const sameSegment = state.generation === gen;
+    if (sameSegment) state.flushInFlight = false;
     if (result === 'degrade') { state.degraded = true; return false; }
     if (result === 'skip') return false;
-    // PATCH confirmed — now safe to update tracking state
-    state.lastSentText = text;
-    state.lastSentAt = Date.now();
+    // PATCH confirmed — only update tracking state if still in same segment
+    if (sameSegment) {
+      state.lastSentText = text;
+      state.lastSentAt = Date.now();
+    }
     state.previewEverDelivered = true;
     return true; // 'sent'
-  }).catch(() => { state.flushInFlight = false; return false; });
+  }).catch(() => {
+    if (state.generation === gen) state.flushInFlight = false;
+    return false;
+  });
 
   state.lastFlushPromise = promise;
 }
@@ -170,6 +181,13 @@ function flushPreview(
  * Finalize the current streaming preview segment: flush pending text,
  * end the preview card, and reset state for the next segment.
  * Used when a tool_use or permission_request splits the response.
+ *
+ * ETH-98: When a flush is in-flight (e.g. the initial card CREATE hasn't
+ * returned yet), we can't synchronously PATCH the remaining text.  Instead,
+ * we capture the old segment's state, reset immediately so the next segment
+ * starts cleanly, and chain a deferred PATCH + endPreview onto the in-flight
+ * promise.  The generation guard in flushPreview prevents the old promise's
+ * .then() from corrupting the new segment's state.
  */
 function finalizePreviewSegment(
   adapter: BaseChannelAdapter,
@@ -182,18 +200,57 @@ function finalizePreviewSegment(
     clearTimeout(ps.throttleTimer);
     ps.throttleTimer = null;
   }
-  if (ps.pendingText && ps.pendingText !== ps.lastSentText) {
-    flushPreview(adapter, ps, cfg);
-  }
-  if (ps.lastSentAt > 0) {
-    adapter.endPreview?.(chatId, ps.draftId);
-  }
-  ps.textOffset += ps.pendingText.length;
+
+  // Capture current segment's state before resetting
+  const segPendingText = ps.pendingText;
+  const segLastSentText = ps.lastSentText;
+  const segDraftId = ps.draftId;
+  const segLastSentAt = ps.lastSentAt;
+  const hadInFlight = ps.flushInFlight;
+  const prevPromise = ps.lastFlushPromise;
+  const needsFlush = segPendingText && segPendingText !== segLastSentText;
+
+  // Reset state immediately so the next segment starts cleanly (ETH-98)
+  ps.textOffset += segPendingText.length;
   ps.draftId = generateDraftId();
   ps.lastSentText = '';
   ps.lastSentAt = 0;
   ps.pendingText = '';
+  ps.flushInFlight = false; // New segment starts without in-flight
   ps.lastFlushPromise = null;
+  ps.generation++;
+
+  if (hadInFlight && prevPromise) {
+    // In-flight flush (e.g. CREATE) — chain deferred PATCH + endPreview
+    prevPromise.then(() => {
+      if (needsFlush && adapter.sendPreview) {
+        const patchText = segPendingText.length > cfg.maxChars
+          ? segPendingText.slice(0, cfg.maxChars) + '...'
+          : segPendingText;
+        return adapter.sendPreview(chatId, patchText, segDraftId);
+      }
+      return undefined;
+    }).then(() => {
+      adapter.endPreview?.(chatId, segDraftId);
+    }).catch(() => {
+      // Best-effort — old card may be incomplete but new segment continues
+    });
+  } else {
+    // No in-flight — synchronous path
+    if (needsFlush) {
+      // Direct sendPreview (not through flushPreview to avoid state confusion)
+      if (adapter.sendPreview) {
+        const patchText = segPendingText.length > cfg.maxChars
+          ? segPendingText.slice(0, cfg.maxChars) + '...'
+          : segPendingText;
+        adapter.sendPreview(chatId, patchText, segDraftId)
+          .then(() => adapter.endPreview?.(chatId, segDraftId))
+          .catch(() => {});
+      }
+    } else if (segLastSentAt > 0) {
+      adapter.endPreview?.(chatId, segDraftId);
+    }
+  }
 }
 
 // ── Channel-aware rendering dispatch ──────────────────────────
@@ -679,6 +736,7 @@ async function handleMessage(
       textOffset: 0,
       lastFlushPromise: null,
       previewEverDelivered: false,
+      generation: 0,
     };
   }
 

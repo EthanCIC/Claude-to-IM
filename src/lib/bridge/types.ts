@@ -205,6 +205,9 @@ export interface StreamingPreviewState {
   lastFlushPromise: Promise<boolean> | null;
   /** True once any preview PATCH has been confirmed delivered. Survives segment resets. */
   previewEverDelivered: boolean;
+  /** Monotonic counter incremented on each segment finalization.
+   *  Prevents stale async callbacks from corrupting the next segment's state (ETH-98). */
+  generation: number;
 }
 
 // ── Config ─────────────────────────────────────────────────────
