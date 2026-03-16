@@ -477,6 +477,10 @@ export function hasPendingTextAnswer(chatId: string): boolean {
   return pendingTextAnswers.has(chatId);
 }
 
+export function getPendingTextAnswerPermId(chatId: string): string | undefined {
+  return pendingTextAnswers.get(chatId);
+}
+
 /**
  * Handle a free-text answer from a chat that previously clicked "Other".
  * Resolves the question permission with the typed text as the answer.

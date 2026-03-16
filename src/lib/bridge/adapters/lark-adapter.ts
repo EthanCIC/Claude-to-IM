@@ -436,6 +436,70 @@ export class LarkAdapter extends FeishuAdapter {
     }
   }
 
+  /**
+   * Update a permission card to show resolved state (Allowed/Denied).
+   * Patches the original message so all group members see the outcome.
+   */
+  async resolvePermissionCard(
+    _chatId: string,
+    messageId: string,
+    action: string,
+    toolName?: string,
+    toolInput?: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.restClient) return;
+
+    let actionLabel = 'Processed';
+    let headerTemplate = 'grey';
+    if (action === 'allow_session') {
+      actionLabel = 'Allowed (Session)';
+      headerTemplate = 'green';
+    } else if (action === 'allow') {
+      actionLabel = 'Allowed';
+      headerTemplate = 'green';
+    } else if (action === 'deny') {
+      actionLabel = 'Denied';
+      headerTemplate = 'red';
+    } else if (action === 'answered') {
+      actionLabel = 'Answered';
+      headerTemplate = 'green';
+    }
+
+    const elements: any[] = [];
+    if (toolName) {
+      elements.push({ tag: 'markdown', content: `Tool: **${toolName}**` });
+    }
+    if (toolInput) {
+      const entries = Object.entries(toolInput);
+      if (entries.length > 0) {
+        const lines = entries.map(([k, v]) => {
+          const val = typeof v === 'string' ? v : JSON.stringify(v);
+          const display = val.length > 200 ? val.slice(0, 200) + '...' : val;
+          return `**${k}:** ${display}`;
+        });
+        elements.push({ tag: 'markdown', content: lines.join('\n') });
+      }
+    }
+
+    const cardJson = JSON.stringify({
+      config: { wide_screen_mode: true },
+      header: {
+        template: headerTemplate,
+        title: { tag: 'plain_text', content: `🔐 ${actionLabel}` },
+      },
+      elements,
+    });
+
+    try {
+      await this.restClient.im.message.patch({
+        path: { message_id: messageId },
+        data: { content: cardJson },
+      });
+    } catch (err) {
+      console.warn('[lark-adapter] Failed to patch resolved permission card:', err instanceof Error ? err.message : err);
+    }
+  }
+
   // ── Permission card with real buttons ───────────────────────
 
   protected override async sendPermissionCard(

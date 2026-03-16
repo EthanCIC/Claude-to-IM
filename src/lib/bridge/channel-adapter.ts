@@ -103,6 +103,19 @@ export abstract class BaseChannelAdapter {
    * Not all platforms support this — default is a no-op.
    */
   expirePermissionCard?(_chatId: string, _messageId: string, _toolName?: string): Promise<void>;
+
+  /**
+   * Update a permission card to show it has been resolved (allowed/denied).
+   * Called after a user clicks Allow/Deny so all group members see the result.
+   * Not all platforms support this — default is a no-op.
+   */
+  resolvePermissionCard?(
+    _chatId: string,
+    _messageId: string,
+    _action: string,
+    _toolName?: string,
+    _toolInput?: Record<string, unknown>,
+  ): Promise<void>;
 }
 
 // ── Adapter Registry ────────────────────────────────────────────

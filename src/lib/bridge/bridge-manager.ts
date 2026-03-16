@@ -625,15 +625,39 @@ async function handleMessage(
     }
 
     let handled = false;
+    let resolveAction = '';
     if (msg.callbackData.startsWith('askq_other:')) {
       handled = broker.handleOtherCallback(msg.callbackData, msg.address.chatId);
     } else if (msg.callbackData.startsWith('askq:')) {
       handled = broker.handleQuestionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId);
+      if (handled) resolveAction = 'answered';
     } else {
       handled = broker.handlePermissionCallback(msg.callbackData, msg.address.chatId, msg.callbackMessageId);
+      if (handled) {
+        const parts = msg.callbackData.split(':');
+        resolveAction = parts[1] || '';
+      }
     }
-    if (handled && adapter.channelType !== 'lark') {
-      // Send confirmation (skip for lark — card updates visually via callback response)
+
+    // Patch the original card so all group members see the resolved state
+    if (handled && resolveAction && adapter.resolvePermissionCard && msg.callbackMessageId) {
+      const permId = msg.callbackData.startsWith('askq:')
+        ? msg.callbackData.split(':')[1]
+        : msg.callbackData.split(':').slice(2).join(':');
+      const link = getBridgeContext().store.getPermissionLink(permId);
+      adapter.resolvePermissionCard(
+        msg.address.chatId,
+        msg.callbackMessageId,
+        resolveAction,
+        link?.toolName,
+        link?.toolInput,
+      ).catch((err) => {
+        console.warn('[bridge-manager] Failed to patch permission card:', err instanceof Error ? err.message : err);
+      });
+    }
+
+    if (handled && !adapter.resolvePermissionCard) {
+      // Send text confirmation for adapters without card patching
       const confirmMsg: OutboundMessage = {
         address: msg.address,
         text: 'Permission response recorded.',
@@ -657,8 +681,20 @@ async function handleMessage(
 
   // Check if this chat has a pending "Other" text answer
   if (rawText && broker.hasPendingTextAnswer(msg.address.chatId)) {
+    const pendingPermId = broker.getPendingTextAnswerPermId(msg.address.chatId);
     const answered = broker.handleTextAnswer(msg.address.chatId, rawText);
     if (answered) {
+      // Patch the original question card so all members see it's answered
+      if (pendingPermId && adapter.resolvePermissionCard) {
+        const link = getBridgeContext().store.getPermissionLink(pendingPermId);
+        if (link?.messageId) {
+          adapter.resolvePermissionCard(
+            msg.address.chatId, link.messageId, 'answered', link.toolName, link.toolInput,
+          ).catch((err) => {
+            console.warn('[bridge-manager] Failed to patch question card:', err instanceof Error ? err.message : err);
+          });
+        }
+      }
       await deliver(adapter, {
         address: msg.address,
         text: 'Answer recorded.',
@@ -1109,6 +1145,17 @@ async function handleCommand(
       const callbackData = `perm:${permAction}:${permId}`;
       const handled = broker.handlePermissionCallback(callbackData, msg.address.chatId);
       if (handled) {
+        // Patch the original permission card for all group members
+        if (adapter.resolvePermissionCard) {
+          const link = getBridgeContext().store.getPermissionLink(permId);
+          if (link?.messageId) {
+            adapter.resolvePermissionCard(
+              msg.address.chatId, link.messageId, permAction, link?.toolName, link?.toolInput,
+            ).catch((err) => {
+              console.warn('[bridge-manager] Failed to patch permission card via /perm:', err instanceof Error ? err.message : err);
+            });
+          }
+        }
         response = `Permission ${permAction}: recorded.`;
       } else {
         response = `Permission not found or already resolved.`;
