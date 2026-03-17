@@ -428,6 +428,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
         content = '[video]';
       } else if (msgType === 'sticker') {
         content = '[sticker]';
+      } else if (msgType === 'folder') {
+        try {
+          const parsed = JSON.parse(rawContent);
+          content = `[folder: ${parsed.file_name || 'unknown'}]`;
+        } catch {
+          content = '[folder]';
+        }
       } else if (msgType === 'merge_forward') {
         content = '[forwarded conversation]';
       } else if (msgType === 'interactive') {
@@ -1197,10 +1204,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
           }
         }
       }
+    } else if (messageType === 'folder') {
+      // Lark API does not support downloading folder contents (messageResource.get returns 234003).
+      // Extract folder name for context and guide user to send files individually.
+      let folderName = 'unknown';
+      try { folderName = JSON.parse(msg.content).file_name || 'unknown'; } catch { /* ignore */ }
+      text = `[folder: ${folderName} — Lark API does not support folder downloads. Please send files individually or as a zip.]`;
     } else {
-      // Unsupported type — log and skip
-      console.log(`[feishu-adapter] Unsupported message type: ${messageType}, msgId: ${msg.message_id}`);
-      return;
+      // Unsupported type — show placeholder instead of silently dropping
+      text = `[${messageType}: unsupported message type]`;
     }
 
     // Resolve @mention placeholders to actual names
@@ -1348,6 +1360,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
           content = '[image]';
         } else if (msgType === 'file') {
           try { content = `[file: ${JSON.parse(rawContent).file_name || 'unknown'}]`; } catch { content = '[file]'; }
+        } else if (msgType === 'folder') {
+          try { content = `[folder: ${JSON.parse(rawContent).file_name || 'unknown'}]`; } catch { content = '[folder]'; }
         } else if (msgType === 'merge_forward') {
           content = '[nested forwarded conversation]';
         } else if (msgType === 'interactive') {
