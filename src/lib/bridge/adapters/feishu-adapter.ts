@@ -281,6 +281,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!this.restClient || this.membersCachedChats.has(chatId)) return;
 
     try {
+      const chatMembers: Array<{ id: string; name: string }> = [];
       let pageToken: string | undefined;
       do {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -297,6 +298,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
           for (const member of items) {
             if (member.member_id && member.name) {
               this.addToNameCache(member.member_id, member.name);
+              if (!this.botIds.has(member.member_id)) {
+                chatMembers.push({ id: member.member_id, name: member.name });
+              }
             }
           }
         }
@@ -304,6 +308,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
       } while (pageToken);
 
       this.membersCachedChats.add(chatId);
+      // Publish to store so conversation-engine can inject into system prompt
+      const { store } = getBridgeContext();
+      store.setGroupMembers?.(chatId, chatMembers);
     } catch (err) {
       console.warn(
         '[feishu-adapter] Failed to load chat members for chatId:', chatId,

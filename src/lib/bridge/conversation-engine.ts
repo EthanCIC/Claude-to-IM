@@ -196,7 +196,12 @@ export async function processMessage(
     ].join(' ');
     // Load per-group context (behavior rules, identity, domain knowledge) if the host provides it
     const groupContext = store.getGroupContext?.(binding.channelType, binding.chatId) ?? null;
-    const appendParts = [session?.system_prompt, groupContext, channelContext].filter(Boolean);
+    // Mentionable users list (populated by adapter after loading chat members)
+    const groupMembers = store.getGroupMembers?.(binding.chatId) ?? null;
+    const membersContext = groupMembers && groupMembers.length > 0
+      ? `## Mentionable Users\nTo @mention someone, use their exact display name:\n${groupMembers.map(m => `- @${m.name}`).join('\n')}`
+      : null;
+    const appendParts = [session?.system_prompt, groupContext, membersContext, channelContext].filter(Boolean);
     const systemPrompt = {
       type: 'preset' as const,
       preset: 'claude_code' as const,

@@ -203,6 +203,12 @@ export interface BridgeStore {
   /** Return per-group system prompt context for a chat, or null if none configured. */
   getGroupContext?(channelType: string, chatId: string): string | null;
 
+  // ── Group members (for outbound @mention resolution) ──
+  /** Store the list of mentionable users for a chat (called by adapters after loading members). */
+  setGroupMembers?(chatId: string, members: Array<{ id: string; name: string }>): void;
+  /** Retrieve the mentionable users list for a chat, or null if not populated. */
+  getGroupMembers?(chatId: string): Array<{ id: string; name: string }> | null;
+
   // ── Channel offsets (adapter watermarks) ──
   getChannelOffset(key: string): string;
   setChannelOffset(key: string, offset: string): void;
