@@ -248,9 +248,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   // ── Sender Identity ────────────────────────────────────────
 
+  /** Sentinel value: word key maps to multiple users — skip transformation. */
+  private static readonly AMBIGUOUS_NAME = '__ambiguous__';
+
   /**
    * Update both forward (open_id → name) and reverse (name → open_id) caches.
    * Reverse cache indexes full name and individual name words (for first-name @mentions).
+   * Collisions on word keys are marked ambiguous (e.g. two "Allen"s → @Allen won't transform).
    */
   private addToNameCache(openId: string, name: string): void {
     this.userNameCache.set(openId, name);
@@ -258,9 +262,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.nameToIdCache.set(lower, openId);
     for (const word of lower.split(/\s+/)) {
       if (word.length < 2) continue;
-      // First writer wins — don't overwrite (avoids ambiguity)
-      if (!this.nameToIdCache.has(word)) {
+      const existing = this.nameToIdCache.get(word);
+      if (!existing) {
         this.nameToIdCache.set(word, openId);
+      } else if (existing !== openId && existing !== FeishuAdapter.AMBIGUOUS_NAME) {
+        // Collision: two different users share the same word — mark ambiguous
+        this.nameToIdCache.set(word, FeishuAdapter.AMBIGUOUS_NAME);
       }
     }
   }
@@ -754,7 +761,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
             return '<at id=all></at>';
           }
           const openId = this.nameToIdCache.get(name.toLowerCase());
-          if (openId) {
+          if (openId && openId !== FeishuAdapter.AMBIGUOUS_NAME) {
             return `<at id=${openId}>${name}</at>`;
           }
           return match; // no match — leave as-is
