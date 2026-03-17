@@ -87,18 +87,11 @@ function hasObserveBuffer(chatId: string): boolean {
 function resolveUserRole(channelType: string, userId?: string): UserRole | undefined {
   const { store } = getBridgeContext();
   const adminsRaw = store.getSetting('bridge_admins');
-  const powerUsersRaw = store.getSetting('bridge_power_users');
-  if (!adminsRaw && !powerUsersRaw) return undefined; // no config → legacy
+  if (!adminsRaw) return undefined; // no config → legacy
   if (!userId) return 'regular';
   const key = `${channelType}:${userId}`;
-  if (adminsRaw) {
-    const list = adminsRaw.split(',').map(s => s.trim()).filter(Boolean);
-    if (list.includes(key) || list.includes(userId)) return 'admin';
-  }
-  if (powerUsersRaw) {
-    const list = powerUsersRaw.split(',').map(s => s.trim()).filter(Boolean);
-    if (list.includes(key) || list.includes(userId)) return 'powerUser';
-  }
+  const list = adminsRaw.split(',').map(s => s.trim()).filter(Boolean);
+  if (list.includes(key) || list.includes(userId)) return 'admin';
   return 'regular';
 }
 
@@ -609,14 +602,15 @@ async function handleMessage(
 
   // Handle callback queries (permission buttons or question answers)
   if (msg.callbackData) {
-    // Validate permission button clicks when roles are configured
-    if (msg.callbackData.startsWith('perm:allow')) {
+    // Only admins can interact with permission/question callbacks
+    if (msg.callbackData.startsWith('perm:') ||
+        msg.callbackData.startsWith('askq:') ||
+        msg.callbackData.startsWith('askq_other:')) {
       const clickerRole = resolveUserRole(adapter.channelType, msg.address.userId);
-      if (clickerRole === 'regular') {
-        // Regular users cannot approve dangerous operations
+      if (clickerRole !== undefined && clickerRole !== 'admin') {
         await deliver(adapter, {
           address: msg.address,
-          text: 'You don\'t have permission to approve this operation.',
+          text: 'Only admins can respond to permission requests.',
           parseMode: 'plain',
         });
         ack();
@@ -679,31 +673,35 @@ async function handleMessage(
   const rawText = msg.text.trim();
   const hasAttachments = msg.attachments && msg.attachments.length > 0;
 
-  // Check if this chat has a pending "Other" text answer
+  // Check if this chat has a pending "Other" text answer (admin-only when roles configured)
   if (rawText && broker.hasPendingTextAnswer(msg.address.chatId)) {
-    const pendingPermId = broker.getPendingTextAnswerPermId(msg.address.chatId);
-    const answered = broker.handleTextAnswer(msg.address.chatId, rawText);
-    if (answered) {
-      // Patch the original question card so all members see it's answered
-      if (pendingPermId && adapter.resolvePermissionCard) {
-        const link = getBridgeContext().store.getPermissionLink(pendingPermId);
-        if (link?.messageId) {
-          adapter.resolvePermissionCard(
-            msg.address.chatId, link.messageId, 'answered', link.toolName, link.toolInput,
-          ).catch((err) => {
-            console.warn('[bridge-manager] Failed to patch question card:', err instanceof Error ? err.message : err);
-          });
+    const answererRole = resolveUserRole(adapter.channelType, msg.address.userId);
+    if (answererRole === undefined || answererRole === 'admin') {
+      const pendingPermId = broker.getPendingTextAnswerPermId(msg.address.chatId);
+      const answered = broker.handleTextAnswer(msg.address.chatId, rawText);
+      if (answered) {
+        // Patch the original question card so all members see it's answered
+        if (pendingPermId && adapter.resolvePermissionCard) {
+          const link = getBridgeContext().store.getPermissionLink(pendingPermId);
+          if (link?.messageId) {
+            adapter.resolvePermissionCard(
+              msg.address.chatId, link.messageId, 'answered', link.toolName, link.toolInput,
+            ).catch((err) => {
+              console.warn('[bridge-manager] Failed to patch question card:', err instanceof Error ? err.message : err);
+            });
+          }
         }
+        await deliver(adapter, {
+          address: msg.address,
+          text: 'Answer recorded.',
+          parseMode: 'plain',
+          replyToMessageId: msg.messageId,
+        });
+        ack();
+        return;
       }
-      await deliver(adapter, {
-        address: msg.address,
-        text: 'Answer recorded.',
-        parseMode: 'plain',
-        replyToMessageId: msg.messageId,
-      });
-      ack();
-      return;
     }
+    // Regular user's message is not a permission answer — fall through to normal processing
   }
 
   // Handle image-only download failures — surface error to user instead of silently dropping
@@ -1133,7 +1131,12 @@ async function handleCommand(
     }
 
     case '/perm': {
-      // Text-based permission approval fallback (for channels without inline buttons)
+      // Admin-only: text-based permission approval fallback
+      const permRole = resolveUserRole(adapter.channelType, msg.address.userId);
+      if (permRole !== undefined && permRole !== 'admin') {
+        response = 'Only admins can use this command.';
+        break;
+      }
       // Usage: /perm allow <id> | /perm allow_session <id> | /perm deny <id>
       const permParts = args.split(/\s+/);
       const permAction = permParts[0];

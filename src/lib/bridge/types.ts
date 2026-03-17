@@ -10,7 +10,7 @@
 export type { FileAttachment } from './host.js';
 
 /** User permission role for access control. undefined = no role enforcement (legacy). */
-export type UserRole = 'admin' | 'powerUser' | 'regular';
+export type UserRole = 'admin' | 'regular';
 
 // ── Channel Types ──────────────────────────────────────────────
 
