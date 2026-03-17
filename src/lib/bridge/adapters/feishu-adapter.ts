@@ -142,6 +142,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private static readonly BOT_CONTENT_CACHE_MAX = 200;
   /** Timestamp of the last PATCH sent (across all sessions) for global rate limiting. */
   private lastPatchAt = 0;
+  /** Reverse cache: lowercase display name (and first-name fragments) → open_id for outbound @mention. */
+  private nameToIdCache = new Map<string, string>();
   /** Minimum interval (ms) between PATCHes across all sessions to reduce API rate limit collisions. */
   private static readonly MIN_PATCH_INTERVAL = 200;
   /** Max retry attempts for rate-limited PATCHes. */
@@ -247,6 +249,23 @@ export class FeishuAdapter extends BaseChannelAdapter {
   // ── Sender Identity ────────────────────────────────────────
 
   /**
+   * Update both forward (open_id → name) and reverse (name → open_id) caches.
+   * Reverse cache indexes full name and individual name words (for first-name @mentions).
+   */
+  private addToNameCache(openId: string, name: string): void {
+    this.userNameCache.set(openId, name);
+    const lower = name.toLowerCase();
+    this.nameToIdCache.set(lower, openId);
+    for (const word of lower.split(/\s+/)) {
+      if (word.length < 2) continue;
+      // First writer wins — don't overwrite (avoids ambiguity)
+      if (!this.nameToIdCache.has(word)) {
+        this.nameToIdCache.set(word, openId);
+      }
+    }
+  }
+
+  /**
    * Load all members of a chat and populate userNameCache.
    * Uses Group Member API (im.v1.chat.members) which only requires IM permissions,
    * unlike Contact API which needs contact:contact.base:readonly.
@@ -270,7 +289,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         if (Array.isArray(items)) {
           for (const member of items) {
             if (member.member_id && member.name) {
-              this.userNameCache.set(member.member_id, member.name);
+              this.addToNameCache(member.member_id, member.name);
             }
           }
         }
@@ -350,7 +369,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const name = (resp as any)?.data?.user?.name;
         if (name) {
-          this.userNameCache.set(userId, name);
+          this.addToNameCache(userId, name);
           return name;
         }
       } catch (err) {
@@ -613,7 +632,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!this.restClient) return 'skip';
 
     // Apply the same markdown preprocessing used for final messages
-    const processed = preprocessFeishuMarkdown(text);
+    let processed = preprocessFeishuMarkdown(text);
+    // Transform @Name patterns to Lark at-mention tags
+    processed = this.transformOutboundMentions(processed);
 
     // Build card JSON with update_multi enabled for PATCH support
     const cardJson = JSON.stringify({
@@ -707,6 +728,42 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Don't clear previewQueuedUpdate — in-flight create needs it to PATCH final content
   }
 
+  // ── Outbound @mention ─────────────────────────────────────
+
+  /**
+   * Transform @Name patterns in outbound text to Lark at-mention syntax.
+   * Protects code blocks and inline code from transformation.
+   * - @all / @所有人 → <at id=all></at>
+   * - @Name (matching a cached user) → <at id=OPEN_ID>Name</at>
+   */
+  protected transformOutboundMentions(text: string): string {
+    if (this.nameToIdCache.size === 0) return text;
+
+    // Split by fenced code blocks (odd indices = code blocks, skip them)
+    const parts = text.split(/(```[\s\S]*?```)/g);
+    for (let i = 0; i < parts.length; i += 1) {
+      if (i % 2 === 1) continue;
+      // Match inline code (preserve) or @Name (transform)
+      parts[i] = parts[i]!.replace(
+        /(`[^`]+`)|@([\w\u4e00-\u9fff]+)/g,
+        (match, inlineCode: string | undefined, name: string | undefined) => {
+          if (inlineCode) return match;
+          if (!name) return match;
+          // @all / @所有人
+          if (name === 'all' || name === '所有人') {
+            return '<at id=all></at>';
+          }
+          const openId = this.nameToIdCache.get(name.toLowerCase());
+          if (openId) {
+            return `<at id=${openId}>${name}</at>`;
+          }
+          return match; // no match — leave as-is
+        },
+      );
+    }
+    return parts.join('');
+  }
+
   // ── Send ────────────────────────────────────────────────────
 
   async send(message: OutboundMessage): Promise<SendResult> {
@@ -725,6 +782,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (message.parseMode === 'Markdown') {
       text = preprocessFeishuMarkdown(text);
     }
+
+    // Transform @Name patterns to Lark at-mention tags
+    text = this.transformOutboundMentions(text);
 
     // If there are inline buttons, route to appropriate card type
     if (message.inlineButtons && message.inlineButtons.length > 0) {
