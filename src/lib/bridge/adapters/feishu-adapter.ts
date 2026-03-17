@@ -772,25 +772,38 @@ export class FeishuAdapter extends BaseChannelAdapter {
   protected transformOutboundMentions(text: string): string {
     if (this.nameToIdCache.size === 0) return text;
 
+    // Build dynamic regex from cached names, longest first (greedy matching).
+    // This ensures "@Ethan Chen" matches the full name before trying "@Ethan".
+    const entries = [...this.nameToIdCache.entries()]
+      .filter(([, id]) => id !== FeishuAdapter.AMBIGUOUS_NAME)
+      .sort((a, b) => b[0].length - a[0].length);
+    if (entries.length === 0) return text;
+
+    const escaped = entries.map(([name]) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    // Combined pattern: inline code (preserve) | @(all|所有人|name1|name2|...) followed by non-word
+    const mentionRegex = new RegExp(
+      `(\`[^\`]+\`)|@(all|所有人|${escaped.join('|')})(?!\\w)`,
+      'gi',
+    );
+
     // Split by fenced code blocks (odd indices = code blocks, skip them)
     const parts = text.split(/(```[\s\S]*?```)/g);
     for (let i = 0; i < parts.length; i += 1) {
       if (i % 2 === 1) continue;
-      // Match inline code (preserve) or @Name (transform)
       parts[i] = parts[i]!.replace(
-        /(`[^`]+`)|@([\w\u4e00-\u9fff]+)/g,
+        mentionRegex,
         (match, inlineCode: string | undefined, name: string | undefined) => {
           if (inlineCode) return match;
           if (!name) return match;
-          // @all / @所有人
-          if (name === 'all' || name === '所有人') {
+          const lower = name.toLowerCase();
+          if (lower === 'all' || name === '所有人') {
             return '<at id=all></at>';
           }
-          const openId = this.nameToIdCache.get(name.toLowerCase());
-          if (openId && openId !== FeishuAdapter.AMBIGUOUS_NAME) {
+          const openId = this.nameToIdCache.get(lower);
+          if (openId) {
             return `<at id=${openId}>${name}</at>`;
           }
-          return match; // no match — leave as-is
+          return match;
         },
       );
     }
