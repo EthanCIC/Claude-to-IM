@@ -191,6 +191,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       'im.message.receive_v1': async (data) => {
         await this.handleIncomingEvent(data as FeishuMessageEventData);
       },
+      'im.chat.member.user.added_v1': async (data) => {
+        await this.handleMemberChange(data);
+      },
+      'im.chat.member.user.deleted_v1': async (data) => {
+        await this.handleMemberChange(data);
+      },
     });
 
     this.wsClient = new lark.WSClient({
@@ -317,6 +323,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
         err instanceof Error ? err.message : err,
       );
     }
+  }
+
+  /**
+   * Handle member added/deleted events — invalidate cache and reload.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  protected async handleMemberChange(data: any): Promise<void> {
+    const chatId = data?.chat_id;
+    if (!chatId) return;
+    // Invalidate so next loadChatMembers does a full reload
+    this.membersCachedChats.delete(chatId);
+    await this.loadChatMembers(chatId);
+    console.log(`[feishu-adapter] Member change in ${chatId}, reloaded ${this.userNameCache.size} users`);
   }
 
   /**

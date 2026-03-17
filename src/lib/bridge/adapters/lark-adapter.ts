@@ -61,13 +61,19 @@ export class LarkAdapter extends FeishuAdapter {
     const verificationToken = this.setting('verification_token') || undefined;
     this.encryptKey = this.setting('encrypt_key') || undefined;
 
-    // EventDispatcher handles message events only
+    // EventDispatcher handles message + member change events
     const eventDispatcher = new lark.EventDispatcher({
       verificationToken,
       encryptKey: this.encryptKey,
     }).register({
       'im.message.receive_v1': async (data) => {
         await this.handleIncomingEvent(data as any);
+      },
+      'im.chat.member.user.added_v1': async (data) => {
+        await this.handleMemberChange(data);
+      },
+      'im.chat.member.user.deleted_v1': async (data) => {
+        await this.handleMemberChange(data);
       },
     });
 
