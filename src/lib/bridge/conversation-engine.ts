@@ -202,7 +202,10 @@ export async function processMessage(
     const membersContext = groupMembers && groupMembers.length > 0
       ? `## Mentionable Users\nTo @mention someone, use their exact display name:\n${groupMembers.map(m => `- @${m.name}`).join('\n')}`
       : null;
-    const appendParts = [session?.system_prompt, groupContext, membersContext, channelContext].filter(Boolean);
+    // Subagents are isolated CLI subprocesses that cannot execute MCP tools (permission not inherited).
+    // Loading MCP schemas via ToolSearch wastes 75-86K context tokens for nothing.
+    const mcpSubagentRule = 'Do NOT delegate MCP tool operations (Lark/Feishu API, document editing, Bitable, messaging, etc.) to subagents via the Agent tool. Subagents are isolated subprocesses that cannot execute MCP tools — they will be denied and waste context loading schemas. Perform all MCP operations directly in the main session. Only delegate tasks that use local tools (file reads, code search, analysis, Bash commands).';
+    const appendParts = [session?.system_prompt, groupContext, membersContext, channelContext, mcpSubagentRule].filter(Boolean);
     const systemPrompt = {
       type: 'preset' as const,
       preset: 'claude_code' as const,
