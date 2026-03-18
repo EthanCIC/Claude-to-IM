@@ -1364,6 +1364,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
           }
         }
       }
+    } else if (messageType === 'interactive') {
+      // Interactive card — reuse extractCardContent (wrapping msg to match expected shape)
+      text = this.extractCardContent({ body: { content: msg.content } }) || '[interactive card]';
     } else if (messageType === 'folder') {
       // Lark API does not support downloading folder contents (messageResource.get returns 234003).
       // Extract folder name for context and guide user to send files individually.
@@ -1714,6 +1717,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
       } else if (tag === 'column_set' || tag === 'column') {
         if (obj.columns) walk(obj.columns);
         if (obj.elements) walk(obj.elements);
+      } else if (tag === 'button') {
+        const label = (obj.text as Record<string, unknown>)?.content || '';
+        const url = obj.url || '';
+        if (label && url) parts.push(`[${label}](${url})`);
+        else if (label) parts.push(String(label));
       } else if (tag === 'img') {
         parts.push('[image]');
       } else if (tag === 'br') {
@@ -1722,6 +1730,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
       // Recurse into elements/body — check both direct and property-wrapped
       if (obj.elements) walk(obj.elements);
+      if (obj.actions) walk(obj.actions);
       if (prop?.elements) walk(prop.elements);
       if (obj.body && typeof obj.body === 'object') {
         const body = obj.body as Record<string, unknown>;
