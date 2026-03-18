@@ -496,9 +496,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
       } else if (msgType === 'merge_forward') {
         content = '[forwarded conversation]';
       } else if (msgType === 'interactive') {
-        // Try raw_card_content json_card first (schema 2.0 full content) (ETH-89)
+        // Try raw_card_content json_card first (ETH-89)
+        // Lark API sometimes returns incomplete card on first attempt (ETH-96), retry once
         console.log('[feishu-adapter] fetchQuotedContent: interactive card, msgId:', parentId);
-        content = this.extractCardContent(item) || '[interactive]';
+        content = this.extractCardContent(item) || '';
+        if (!content) {
+          await new Promise(r => setTimeout(r, 300));
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const retry = await (this.restClient as any).im.message.get({
+            path: { message_id: parentId },
+            params: { card_msg_content_type: 'raw_card_content' },
+          });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const retryItem = (retry as any)?.data?.items?.[0];
+          content = (retryItem ? this.extractCardContent(retryItem) : null) || '[interactive]';
+        }
       } else {
         content = `[${msgType || 'unknown'}]`;
       }
@@ -1712,14 +1724,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
       } else if ((tag === 'plain_text' || tag === 'lark_md' || tag === 'markdown' || tag === 'code_span') && content?.trim()) {
         parts.push(content);
       } else if (tag === 'div') {
-        if (obj.text) walk(obj.text);
+        // property-wrapped: { tag: 'div', property: { text: {...} } }
+        const textChild = obj.text || prop?.text;
+        if (textChild) walk(textChild);
         if (obj.extra) walk(obj.extra);
       } else if (tag === 'column_set' || tag === 'column') {
-        if (obj.columns) walk(obj.columns);
-        if (obj.elements) walk(obj.elements);
+        // property-wrapped: { tag: 'column_set', property: { columns: [...] } }
+        const cols = obj.columns || prop?.columns;
+        const elems = obj.elements || prop?.elements;
+        if (cols) walk(cols);
+        if (elems) walk(elems);
       } else if (tag === 'button') {
-        const label = (obj.text as Record<string, unknown>)?.content || '';
-        const url = obj.url || '';
+        // property-wrapped: { tag: 'button', property: { text: { property: { content } }, url } }
+        const textObj = (obj.text || prop?.text) as Record<string, unknown> | undefined;
+        const label = textObj?.content || (textObj?.property as Record<string, unknown>)?.content || '';
+        const url = obj.url || prop?.url || '';
         if (label && url) parts.push(`[${label}](${url})`);
         else if (label) parts.push(String(label));
       } else if (tag === 'img') {
@@ -1730,7 +1749,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
       // Recurse into elements/body — check both direct and property-wrapped
       if (obj.elements) walk(obj.elements);
-      if (obj.actions) walk(obj.actions);
+      if (obj.actions || prop?.actions) walk(obj.actions || prop?.actions);
       if (prop?.elements) walk(prop.elements);
       if (obj.body && typeof obj.body === 'object') {
         const body = obj.body as Record<string, unknown>;
