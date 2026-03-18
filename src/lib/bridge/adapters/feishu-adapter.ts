@@ -36,8 +36,6 @@ import {
   countMarkdownTables,
   splitAtTableBoundary,
   MAX_CARD_TABLES,
-  extractCardDescriptor,
-  buildRichCardContent,
 } from '../markdown/feishu.js';
 
 /** Max number of message_ids to keep for dedup. */
@@ -885,39 +883,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
       text = preprocessFeishuMarkdown(text);
     }
 
-    // Check for interactive card descriptor before mention transform
-    // (descriptor markdown will be transformed individually below)
-    const cardResult = extractCardDescriptor(text);
-    if (cardResult) {
-      // Transform @mentions inside each section's markdown content
-      const descriptor = cardResult.descriptor;
-      if (descriptor.sections) {
-        for (let i = 0; i < descriptor.sections.length; i++) {
-          const sec = descriptor.sections[i];
-          if (sec.type === 'markdown') {
-            sec.content = this.transformOutboundMentions(
-              preprocessFeishuMarkdown(sec.content),
-            );
-          } else if (sec.type === 'columns') {
-            sec.columns = sec.columns.map((col) =>
-              this.transformOutboundMentions(preprocessFeishuMarkdown(col)),
-            );
-          }
-        }
-      }
-      const richResult = await this.sendRichCard(message.address.chatId, descriptor);
-      // Send remaining text (if any) through normal pipeline
-      if (cardResult.remainingText) {
-        const remaining = this.transformOutboundMentions(cardResult.remainingText);
-        if (hasComplexMarkdown(remaining)) {
-          await this.sendAsCard(message.address.chatId, remaining);
-        } else {
-          await this.sendAsPost(message.address.chatId, remaining);
-        }
-      }
-      return richResult;
-    }
-
     // Transform @Name patterns to Lark at-mention tags
     text = this.transformOutboundMentions(text);
 
@@ -1013,53 +978,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : 'Send failed' };
     }
-  }
-
-  // ── Rich interactive card (from CardDescriptor) ─────────────
-
-  /**
-   * Send a rich interactive card built from a CardDescriptor.
-   * Falls back to sendAsPost on failure.
-   */
-  private async sendRichCard(chatId: string, descriptor: import('../types.js').CardDescriptor): Promise<SendResult> {
-    const cardContent = buildRichCardContent(descriptor);
-
-    try {
-      const res = await this.restClient!.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: 'interactive',
-          content: cardContent,
-        },
-      });
-
-      if (res?.data?.message_id) {
-        console.log(`[feishu-adapter] Sent rich card to ${chatId}, msgId: ${res.data.message_id}`);
-        const summary = descriptor.header?.title || 'interactive card';
-        this.cacheBotMessageContent(res.data.message_id, summary);
-        return { ok: true, messageId: res.data.message_id };
-      }
-      console.warn('[feishu-adapter] Rich card send failed:', res?.msg, res?.code);
-    } catch (err) {
-      console.warn('[feishu-adapter] Rich card error, falling back to post:', err instanceof Error ? err.message : err);
-    }
-
-    // Fallback: flatten descriptor to markdown and send as post
-    const fallbackParts: string[] = [];
-    if (descriptor.header) fallbackParts.push(`**${descriptor.header.title}**\n`);
-    if (descriptor.sections) {
-      for (const sec of descriptor.sections) {
-        if (sec.type === 'markdown') fallbackParts.push(sec.content);
-        else if (sec.type === 'columns') fallbackParts.push(sec.columns.join(' | '));
-        else if (sec.type === 'divider') fallbackParts.push('---');
-        else if (sec.type === 'note') fallbackParts.push(`_${sec.content}_`);
-      }
-    }
-    if (descriptor.buttons) {
-      fallbackParts.push(descriptor.buttons.map(b => `[${b.text}](${b.url})`).join(' '));
-    }
-    return this.sendAsPost(chatId, fallbackParts.join('\n'));
   }
 
   // ── Permission card (with real action buttons) ─────────────

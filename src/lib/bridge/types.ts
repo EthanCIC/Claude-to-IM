@@ -210,36 +210,6 @@ export interface StreamingPreviewState {
   generation: number;
 }
 
-// ── Interactive Card Descriptor ───────────────────────────────
-
-/** Colors supported by Lark card headers. */
-export type CardHeaderColor =
-  | 'blue' | 'wathet' | 'turquoise' | 'green' | 'yellow'
-  | 'orange' | 'red' | 'carmine' | 'violet' | 'purple'
-  | 'indigo' | 'grey' | 'default';
-
-/** A button in the card's action bar. */
-export interface CardButton {
-  text: string;
-  url: string;
-  /** Button style. Defaults to 'primary'. */
-  type?: 'primary' | 'default' | 'danger';
-}
-
-/** A single section in the card body. Rendered in order. */
-export type CardSection =
-  | { type: 'markdown'; content: string }
-  | { type: 'columns'; columns: string[]; background?: 'grey' | 'default' }
-  | { type: 'divider' }
-  | { type: 'note'; content: string };
-
-/** Simplified card descriptor that the LLM outputs inside a fenced block. */
-export interface CardDescriptor {
-  header?: { title: string; color?: CardHeaderColor };
-  buttons?: CardButton[];
-  sections?: CardSection[];
-}
-
 // ── Config ─────────────────────────────────────────────────────
 
 /** Platform-specific message length limits */
