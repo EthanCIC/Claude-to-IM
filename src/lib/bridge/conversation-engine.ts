@@ -192,6 +192,7 @@ export async function processMessage(
     // Build system prompt: always use Claude Code preset + append channel context
     const channelContext = [
       `The user is communicating via ${binding.channelType} (IM platform).`,
+      `Chat ID: ${binding.chatId}.`,
       `Responses are rendered as ${binding.channelType === 'telegram' ? 'HTML' : 'markdown'} in a chat app — keep formatting simple and responses concise.`,
     ].join(' ');
     // Load per-group context (behavior rules, identity, domain knowledge) if the host provides it
