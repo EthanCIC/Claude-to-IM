@@ -33,6 +33,9 @@ import {
   hasComplexMarkdown,
   buildCardContent,
   buildPostContent,
+  countMarkdownTables,
+  splitAtTableBoundary,
+  MAX_CARD_TABLES,
 } from '../markdown/feishu.js';
 
 /** Max number of message_ids to keep for dedup. */
@@ -137,6 +140,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private previewQueuedUpdate = new Map<string, string>();
   /** Generation counter per chat — incremented by endPreview to invalidate in-flight creates. */
   private previewGeneration = new Map<string, number>();
+  /** Overflow text when preview content exceeds Lark card table limit. Sent as follow-up on endPreview. */
+  private previewOverflow = new Map<string, string>();
   /** Cache: messageId → final text content for bot-sent messages (for quote resolution). */
   private botMessageContentCache = new Map<string, string>();
   private static readonly BOT_CONTENT_CACHE_MAX = 200;
@@ -240,6 +245,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.previewDegraded.clear();
     this.previewQueuedUpdate.clear();
     this.previewGeneration.clear();
+    this.previewOverflow.clear();
     this.botMessageContentCache.clear();
     this.userNameCache.clear();
     this.contactApiDisabled = false;
@@ -669,6 +675,19 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Transform @Name patterns to Lark at-mention tags
     processed = this.transformOutboundMentions(processed);
 
+    // Guard against Lark's card table limit (~10 tables → ErrCode 11310).
+    // If the streamed content already exceeds the safe limit, truncate and
+    // stash the overflow for delivery in endPreview().
+    if (countMarkdownTables(processed) > MAX_CARD_TABLES) {
+      const { head, tail } = splitAtTableBoundary(processed, MAX_CARD_TABLES);
+      processed = head + '\n\n*(continued in next message…)*';
+      this.previewOverflow.set(chatId, tail);
+    } else {
+      // Content fits — clear any previously stashed overflow (content may
+      // have been trimmed by the LLM between updates).
+      this.previewOverflow.delete(chatId);
+    }
+
     // Build card JSON with update_multi enabled for PATCH support
     const cardJson = JSON.stringify({
       schema: '2.0',
@@ -741,7 +760,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const code = (err as any)?.code;
       // Permanent failures: degrade
-      if (code === 230001 || code === 230002) {
+      if (code === 230001 || code === 230002 || code === 230099 || code === 11310) {
         this.previewDegraded.add(chatId);
         return 'degrade';
       }
@@ -759,6 +778,41 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Increment generation so in-flight creates don't re-adopt stale card IDs
     this.previewGeneration.set(chatId, (this.previewGeneration.get(chatId) || 0) + 1);
     // Don't clear previewQueuedUpdate — in-flight create needs it to PATCH final content
+
+    // Deliver any overflow content that was truncated from the preview card
+    // due to the Lark card table limit.
+    const overflow = this.previewOverflow.get(chatId);
+    if (overflow) {
+      this.previewOverflow.delete(chatId);
+      // Fire-and-forget: endPreview is synchronous (void return)
+      this.sendOverflowMessages(chatId, overflow).catch(err => {
+        console.warn('[feishu-adapter] Failed to send overflow:', err instanceof Error ? err.message : err);
+      });
+    }
+  }
+
+  /**
+   * Send overflow content that didn't fit in the preview card.
+   * Recursively splits if the overflow itself exceeds the table limit.
+   */
+  private async sendOverflowMessages(chatId: string, text: string): Promise<void> {
+    let remaining = text;
+    while (remaining) {
+      const tableCount = countMarkdownTables(remaining);
+      if (tableCount > MAX_CARD_TABLES) {
+        const { head, tail } = splitAtTableBoundary(remaining, MAX_CARD_TABLES);
+        await this.sendAsCard(chatId, head);
+        remaining = tail;
+      } else {
+        // Last chunk — use normal send path (card or post based on content)
+        if (hasComplexMarkdown(remaining)) {
+          await this.sendAsCard(chatId, remaining);
+        } else {
+          await this.sendAsPost(chatId, remaining);
+        }
+        break;
+      }
+    }
   }
 
   // ── Outbound @mention ─────────────────────────────────────

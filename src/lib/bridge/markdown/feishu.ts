@@ -47,6 +47,70 @@ export function preprocessFeishuMarkdown(text: string): string {
   return result.trim();
 }
 
+// ── Card table limit helpers ──────────────────────────────────────────
+// Lark interactive cards have a hard limit on the number of markdown tables
+// (~10). Exceeding it causes the entire card to be rejected with ErrCode 11310.
+
+/** Maximum tables per card — set below Lark's actual limit for safety margin. */
+export const MAX_CARD_TABLES = 8;
+
+/**
+ * Count distinct markdown table blocks in text.
+ * A table block is a group of consecutive lines starting with `|`.
+ * Lines inside fenced code blocks (```) are excluded.
+ */
+export function countMarkdownTables(text: string): number {
+  const lines = text.split('\n');
+  let count = 0;
+  let inTable = false;
+  let inCodeBlock = false;
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) { inCodeBlock = !inCodeBlock; continue; }
+    if (inCodeBlock) continue;
+    const isTableLine = /^\s*\|/.test(line);
+    if (isTableLine && !inTable) { count++; inTable = true; }
+    else if (!isTableLine) { inTable = false; }
+  }
+  return count;
+}
+
+/**
+ * Split markdown at a table boundary so the first chunk has at most `maxTables` tables.
+ * Returns `{ head, tail }` where head contains the first maxTables tables and
+ * tail contains everything after. Splits at the line before the (maxTables+1)-th table.
+ */
+export function splitAtTableBoundary(text: string, maxTables: number): { head: string; tail: string } {
+  const lines = text.split('\n');
+  let tableCount = 0;
+  let inTable = false;
+  let inCodeBlock = false;
+  let splitIdx = lines.length;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*```/.test(lines[i])) { inCodeBlock = !inCodeBlock; continue; }
+    if (inCodeBlock) continue;
+    const isTableLine = /^\s*\|/.test(lines[i]);
+    if (isTableLine && !inTable) {
+      tableCount++;
+      if (tableCount > maxTables) {
+        splitIdx = i;
+        break;
+      }
+      inTable = true;
+    } else if (!isTableLine) {
+      inTable = false;
+    }
+  }
+  // Walk back past blank lines and section headers that belong to the next table
+  while (splitIdx > 0 && lines[splitIdx - 1].trim() === '') splitIdx--;
+  // If the line before is a heading (e.g. "**六、ASK Tab**"), include it in tail
+  if (splitIdx > 0 && /^\s*[#*]/.test(lines[splitIdx - 1])) splitIdx--;
+  while (splitIdx > 0 && lines[splitIdx - 1].trim() === '') splitIdx--;
+  return {
+    head: lines.slice(0, splitIdx).join('\n'),
+    tail: lines.slice(splitIdx).join('\n').trim(),
+  };
+}
+
 /**
  * Build Feishu interactive card content (schema 2.0 markdown).
  * Renders code blocks, tables, bold, italic, links, inline code properly.
