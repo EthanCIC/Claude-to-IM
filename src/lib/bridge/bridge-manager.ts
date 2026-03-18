@@ -246,41 +246,6 @@ function finalizePreviewSegment(
   }
 }
 
-// ── Cross-chat messaging ────────────────────────────────────────
-
-/** Regex to extract `<!-- bridge:send_to:CHAT_ID -->content<!-- /bridge:send_to -->` blocks. */
-const CROSS_CHAT_RE = /<!--\s*bridge:send_to:([\w]+)\s*-->([\s\S]*?)<!--\s*\/bridge:send_to\s*-->/g;
-
-interface CrossChatBlock {
-  chatId: string;
-  content: string;
-}
-
-/**
- * Extract cross-chat blocks from LLM response text.
- * Returns the extracted blocks and the remaining text.
- */
-function extractCrossChatBlocks(text: string): { blocks: CrossChatBlock[]; remainingText: string } {
-  const blocks: CrossChatBlock[] = [];
-  const remainingText = text.replace(CROSS_CHAT_RE, (_match, chatId: string, content: string) => {
-    const trimmed = content.trim();
-    if (trimmed && chatId) {
-      blocks.push({ chatId, content: trimmed });
-    }
-    return '';
-  }).trim();
-  return { blocks, remainingText };
-}
-
-/**
- * Check if a chatId is an allowed cross-chat target for a given channel type.
- * Only chats that have an active binding (bot is connected) are allowed.
- */
-function isAllowedChatTarget(channelType: string, chatId: string): boolean {
-  const bindings = router.listBindings(channelType);
-  return bindings.some((b) => b.chatId === chatId && b.active);
-}
-
 // ── Channel-aware rendering dispatch ──────────────────────────
 
 import type { ChannelAddress, SendResult } from './types.js';
@@ -297,31 +262,6 @@ async function deliverResponse(
   sessionId: string,
   replyToMessageId?: string,
 ): Promise<SendResult> {
-  // Extract cross-chat blocks before rendering
-  const { blocks, remainingText } = extractCrossChatBlocks(responseText);
-
-  // Deliver cross-chat messages through the full pipeline
-  for (const block of blocks) {
-    if (!isAllowedChatTarget(address.channelType, block.chatId)) {
-      console.warn(`[bridge-manager] Cross-chat target ${block.chatId} not in whitelist, skipping`);
-      continue;
-    }
-    const targetAddress: ChannelAddress = {
-      channelType: address.channelType,
-      chatId: block.chatId,
-    };
-    // Deliver through the same function (recursive, but cross-chat blocks
-    // are already stripped so no infinite loop)
-    await deliverResponse(adapter, targetAddress, block.content, sessionId);
-  }
-
-  // If all content was cross-chat, nothing left to send to origin
-  if (!remainingText) {
-    return { ok: true };
-  }
-
-  // Continue with normal delivery for remaining text
-  responseText = remainingText;
   if (adapter.channelType === 'telegram') {
     const chunks = markdownToTelegramChunks(responseText, 4096);
     if (chunks.length > 0) {

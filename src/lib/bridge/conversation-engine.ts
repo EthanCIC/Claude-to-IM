@@ -196,16 +196,13 @@ export async function processMessage(
       `Responses are rendered as ${binding.channelType === 'telegram' ? 'HTML' : 'markdown'} in a chat app — keep formatting simple and responses concise.`,
     ];
 
-    // Feishu/Lark: interactive card descriptor + cross-chat messaging
+    // Feishu/Lark: interactive card descriptor
     if (binding.channelType === 'feishu' || binding.channelType === 'lark') {
       channelContextParts.push(
         '\n## Interactive Card',
         'For structured content (analyses, announcements, comparisons), wrap a JSON descriptor in a ```card:interactive fenced block.',
         'Format: {"header":{"title":"...","color":"turquoise"},"sections":[{"type":"markdown","content":"..."},{"type":"columns","columns":["Left","Right"],"background":"grey"},{"type":"divider"},{"type":"note","content":"..."}],"buttons":[{"text":"Label","url":"https://..."}]}',
         'Section types: markdown, columns, divider, note. Colors: blue, turquoise, green, yellow, orange, red, violet, purple, grey, default.',
-        '\n## Cross-chat Messaging',
-        'To send to another connected chat: <!-- bridge:send_to:CHAT_ID -->content<!-- /bridge:send_to -->',
-        'Card descriptors work inside cross-chat blocks.',
       );
     }
 
