@@ -98,6 +98,19 @@ export abstract class BaseChannelAdapter {
   endPreview?(_chatId: string, _draftId: number): void;
 
   /**
+   * Return the platform message ID of the current in-flight preview card
+   * for a given chat. Used during shutdown to persist the card ID so
+   * recovery can PATCH it instead of sending a new message.
+   */
+  getPreviewMessageId?(_chatId: string): string | undefined;
+
+  /**
+   * Seed a preview message ID from a previous session. Used during recovery
+   * so that subsequent sendPreview calls PATCH the existing card.
+   */
+  seedPreviewMessageId?(_chatId: string, _messageId: string): void;
+
+  /**
    * Update a permission card to show it has expired (timeout).
    * Called by the permission broker when the SDK-side permission times out.
    * Not all platforms support this — default is a no-op.

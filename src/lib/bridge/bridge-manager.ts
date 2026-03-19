@@ -571,6 +571,7 @@ export async function notifyShutdown(): Promise<void> {
       chatId: binding.chatId,
       channelType: binding.channelType,
       timestamp: Date.now(),
+      previewMessageId: adapter.getPreviewMessageId?.(binding.chatId),
     });
 
     notifications.push(
@@ -624,21 +625,52 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
       continue;
     }
 
+    // Seed preview message ID so recovery can PATCH the interrupted card
+    if (task.previewMessageId && adapter.seedPreviewMessageId) {
+      adapter.seedPreviewMessageId(task.chatId, task.previewMessageId);
+      console.log(`[bridge-manager] Seeded preview msgId ${task.previewMessageId} for ${task.chatId}`);
+    }
+
     const taskAbort = new AbortController();
     state.activeTasks.set(binding.codepilotSessionId, taskAbort);
     syncActiveTasksToHost();
 
+    // Set up streaming preview if adapter supports it and we have a card to PATCH
+    const hasPreviewCard = !!task.previewMessageId && !!adapter.sendPreview;
+    const streamCfg = hasPreviewCard ? getStreamConfig(adapter.channelType) : null;
+
     try {
-      console.log(`[bridge-manager] Recovering task for ${task.chatId}...`);
+      console.log(`[bridge-manager] Recovering task for ${task.chatId}${hasPreviewCard ? ' (PATCH preview card)' : ''}...`);
       const result = await engine.processMessage(
         binding,
         'Your previous response was interrupted by a system restart. Continue where you left off and complete your response.',
         undefined,  // no permission callback during recovery
         taskAbort.signal,
+        undefined,  // no files
+        // onPartialText: stream into preview card if we have one
+        (hasPreviewCard && streamCfg) ? (fullText: string) => {
+          if (!adapter.sendPreview) return;
+          const text = fullText.length > streamCfg!.maxChars
+            ? fullText.slice(0, streamCfg!.maxChars) + '...'
+            : fullText;
+          adapter.sendPreview(task.chatId, text, 0).catch(() => {});
+        } : undefined,
       );
 
+      // If we PATCHed the preview card, finalize it
+      if (hasPreviewCard) {
+        // Final PATCH with complete text
+        if (result.responseText && adapter.sendPreview) {
+          const finalText = result.responseText.length > (streamCfg?.maxChars ?? 28000)
+            ? result.responseText.slice(0, streamCfg?.maxChars ?? 28000) + '...'
+            : result.responseText;
+          await adapter.sendPreview(task.chatId, finalText, 0).catch(() => {});
+        }
+        adapter.endPreview?.(task.chatId, 0);
+      }
+
       const isNoOp = !result.responseText || result.responseText.trim() === 'No response requested.';
-      if (!isNoOp) {
+      if (!isNoOp && !hasPreviewCard) {
         await deliverResponse(
           adapter,
           { channelType: task.channelType, chatId: task.chatId },

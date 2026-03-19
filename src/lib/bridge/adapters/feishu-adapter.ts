@@ -827,6 +827,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
+  getPreviewMessageId(chatId: string): string | undefined {
+    return this.previewMessages.get(chatId);
+  }
+
+  seedPreviewMessageId(chatId: string, messageId: string): void {
+    this.previewMessages.set(chatId, messageId);
+  }
+
   endPreview(chatId: string, _draftId: number): void {
     // Keep the preview card as the final message — bridge-manager skips
     // deliverResponse when preview was active, so this card IS the response.
