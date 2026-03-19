@@ -625,84 +625,69 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
       continue;
     }
 
-    // Seed preview message ID so recovery can PATCH the interrupted card
-    if (task.previewMessageId && adapter.seedPreviewMessageId) {
-      adapter.seedPreviewMessageId(task.chatId, task.previewMessageId);
-      console.log(`[bridge-manager] Seeded preview msgId ${task.previewMessageId} for ${task.chatId}`);
-    }
-
-    const taskAbort = new AbortController();
-    state.activeTasks.set(binding.codepilotSessionId, taskAbort);
-    syncActiveTasksToHost();
-
-    // Set up streaming preview if adapter supports it and we have a card to PATCH
     const hasPreviewCard = !!task.previewMessageId && !!adapter.sendPreview;
-    const streamCfg = hasPreviewCard ? getStreamConfig(adapter.channelType) : null;
 
-    try {
-      console.log(`[bridge-manager] Recovering task for ${task.chatId}${hasPreviewCard ? ' (PATCH preview card)' : ''}...`);
-      const result = await engine.processMessage(
-        binding,
-        'Your previous response was interrupted by a system restart. Continue where you left off and complete your response.',
-        undefined,  // no permission callback during recovery
-        taskAbort.signal,
-        undefined,  // no files
-        // onPartialText: stream into preview card if we have one
-        (hasPreviewCard && streamCfg) ? (fullText: string) => {
-          if (!adapter.sendPreview) return;
-          const text = fullText.length > streamCfg!.maxChars
-            ? fullText.slice(0, streamCfg!.maxChars) + '...'
-            : fullText;
-          adapter.sendPreview(task.chatId, text, 0).catch(() => {});
-        } : undefined,
-      );
-
-      // If we PATCHed the preview card, finalize it
-      if (hasPreviewCard) {
-        // Final PATCH with complete text
-        if (result.responseText && adapter.sendPreview) {
-          const finalText = result.responseText.length > (streamCfg?.maxChars ?? 28000)
-            ? result.responseText.slice(0, streamCfg?.maxChars ?? 28000) + '...'
-            : result.responseText;
-          await adapter.sendPreview(task.chatId, finalText, 0).catch(() => {});
-        }
-        adapter.endPreview?.(task.chatId, 0);
+    // Use session lock to serialize with any incoming messages
+    await processWithSessionLock(binding.codepilotSessionId, async () => {
+      // Seed preview message ID so final PATCH goes to the interrupted card
+      if (hasPreviewCard && adapter.seedPreviewMessageId) {
+        adapter.seedPreviewMessageId(task.chatId, task.previewMessageId!);
       }
 
-      const isNoOp = !result.responseText || result.responseText.trim() === 'No response requested.';
-      if (!isNoOp && !hasPreviewCard) {
-        await deliverResponse(
-          adapter,
-          { channelType: task.channelType, chatId: task.chatId },
-          result.responseText,
-          binding.codepilotSessionId,
-        );
-      }
-
-      // Update sdkSessionId
-      if (binding.id) {
-        const update = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
-        if (update !== null) {
-          getBridgeContext().store.updateChannelBinding(binding.id, { sdkSessionId: update });
-        }
-      }
-
-      if (result.hasError) {
-        console.warn(`[bridge-manager] Recovery error for ${task.chatId}: ${result.errorMessage}`);
-        await deliver(adapter, {
-          address: { channelType: task.channelType, chatId: task.chatId },
-          text: '重啟後嘗試恢復上次的回覆失敗，請重新 @ 我。',
-          parseMode: 'plain',
-        }).catch(() => {});
-      } else {
-        console.log(`[bridge-manager] Recovery successful for ${task.chatId}`);
-      }
-    } catch (err) {
-      console.error(`[bridge-manager] Recovery failed for ${task.chatId}:`, err);
-    } finally {
-      state.activeTasks.delete(binding.codepilotSessionId);
+      const taskAbort = new AbortController();
+      state.activeTasks.set(binding.codepilotSessionId, taskAbort);
       syncActiveTasksToHost();
-    }
+
+      try {
+        console.log(`[bridge-manager] Recovering task for ${task.chatId}${hasPreviewCard ? ' (will PATCH card)' : ''}...`);
+        // No streaming during recovery — just get the complete response
+        const result = await engine.processMessage(
+          binding,
+          'Your previous response was interrupted by a system restart. Continue where you left off and complete your response.',
+          undefined,  // no permission callback during recovery
+          taskAbort.signal,
+        );
+
+        const isNoOp = !result.responseText || result.responseText.trim() === 'No response requested.';
+
+        if (!isNoOp && hasPreviewCard) {
+          // Single PATCH to update the interrupted card with complete text
+          await adapter.sendPreview!(task.chatId, result.responseText, 0).catch(() => {});
+          adapter.endPreview?.(task.chatId, 0);
+        } else if (!isNoOp) {
+          await deliverResponse(
+            adapter,
+            { channelType: task.channelType, chatId: task.chatId },
+            result.responseText,
+            binding.codepilotSessionId,
+          );
+        }
+
+        // Update sdkSessionId
+        if (binding.id) {
+          const update = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
+          if (update !== null) {
+            getBridgeContext().store.updateChannelBinding(binding.id, { sdkSessionId: update });
+          }
+        }
+
+        if (result.hasError) {
+          console.warn(`[bridge-manager] Recovery error for ${task.chatId}: ${result.errorMessage}`);
+          await deliver(adapter, {
+            address: { channelType: task.channelType, chatId: task.chatId },
+            text: '重啟後嘗試恢復上次的回覆失敗，請重新 @ 我。',
+            parseMode: 'plain',
+          }).catch(() => {});
+        } else {
+          console.log(`[bridge-manager] Recovery successful for ${task.chatId}`);
+        }
+      } catch (err) {
+        console.error(`[bridge-manager] Recovery failed for ${task.chatId}:`, err);
+      } finally {
+        state.activeTasks.delete(binding.codepilotSessionId);
+        syncActiveTasksToHost();
+      }
+    });
   }
 }
 
