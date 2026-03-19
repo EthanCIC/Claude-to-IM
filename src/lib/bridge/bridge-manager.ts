@@ -565,8 +565,8 @@ export async function notifyShutdown(): Promise<void> {
     const adapter = state.adapters.get(binding.channelType);
     if (!adapter) continue;
 
-    // Clear typing indicator before shutdown (adapter still alive)
-    adapter.onMessageEnd?.(binding.chatId);
+    // Don't clear typing indicator — let it persist through restart.
+    // Recovery's finally block will clear it when done.
 
     // Collect interrupted task info for recovery after restart
     interruptedTasks.push({
@@ -636,12 +636,10 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
 
       try {
         console.log(`[bridge-manager] Recovering task for ${task.chatId}...`);
-        // Show typing indicator during recovery
-        adapter.onMessageStart?.(task.chatId);
         // No streaming during recovery — just get the complete response
         const result = await engine.processMessage(
           binding,
-          'The system restarted while you were responding. Your response may have been partially or fully cut off. Please provide the complete answer to the user\'s last question, including re-running any tool calls if needed.',
+          'continue',
           undefined,  // no permission callback during recovery
           taskAbort.signal,
         );
@@ -681,7 +679,6 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
       } catch (err) {
         console.error(`[bridge-manager] Recovery failed for ${task.chatId}:`, err);
       } finally {
-        adapter.onMessageEnd?.(task.chatId);
         state.activeTasks.delete(binding.codepilotSessionId);
         syncActiveTasksToHost();
       }
