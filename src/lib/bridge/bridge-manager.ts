@@ -565,6 +565,9 @@ export async function notifyShutdown(): Promise<void> {
     const adapter = state.adapters.get(binding.channelType);
     if (!adapter) continue;
 
+    // Clear typing indicator before shutdown (adapter still alive)
+    adapter.onMessageEnd?.(binding.chatId);
+
     // Collect interrupted task info for recovery after restart
     interruptedTasks.push({
       codepilotSessionId: binding.codepilotSessionId,
@@ -649,12 +652,29 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
         );
 
         const isNoOp = !result.responseText || result.responseText.trim() === 'No response requested.';
+        console.log(`[bridge-manager] Recovery response: ${result.responseText?.length ?? 0} chars, hasError=${result.hasError}, sdkSessionId=${result.sdkSessionId?.slice(0, 8) ?? 'none'}`);
 
         if (!isNoOp && hasPreviewCard) {
           // PATCH the interrupted card with complete response text.
           // endPreview handles overflow (sends additional messages if needed).
-          await adapter.sendPreview!(task.chatId, result.responseText, 0).catch(() => {});
+          const patchResult = await adapter.sendPreview!(task.chatId, result.responseText, 0).catch(() => 'skip' as const);
           adapter.endPreview?.(task.chatId, 0);
+          if (patchResult === 'sent') {
+            // Notify user the card above was updated (they won't see the PATCH otherwise)
+            await deliver(adapter, {
+              address: { channelType: task.channelType, chatId: task.chatId },
+              text: '(已恢復，回覆已更新至上方卡片)',
+              parseMode: 'plain',
+            }).catch(() => {});
+          } else {
+            // PATCH failed — fall back to normal delivery
+            await deliverResponse(
+              adapter,
+              { channelType: task.channelType, chatId: task.chatId },
+              result.responseText,
+              binding.codepilotSessionId,
+            );
+          }
         } else if (!isNoOp) {
           await deliverResponse(
             adapter,
