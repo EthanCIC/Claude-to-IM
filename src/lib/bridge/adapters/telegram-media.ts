@@ -15,7 +15,7 @@ const TELEGRAM_API = 'https://api.telegram.org';
 const OPTIMAL_LONG_EDGE = 1568;
 
 /** Default max image size in bytes (20 MB). */
-const DEFAULT_MAX_IMAGE_SIZE = 20 * 1024 * 1024;
+const DEFAULT_MAX_IMAGE_SIZE = 200 * 1024 * 1024;
 
 /** Max retry attempts for download. */
 const MAX_RETRIES = 3;

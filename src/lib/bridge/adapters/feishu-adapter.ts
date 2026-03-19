@@ -41,8 +41,11 @@ import {
 /** Max number of message_ids to keep for dedup. */
 const DEDUP_MAX = 1000;
 
-/** Max file download size (20 MB). */
+/** Max file download size for in-memory buffers (20 MB). */
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
+
+/** Max file download size for disk-based downloads (200 MB). */
+const MAX_FILE_SIZE_DISK = 200 * 1024 * 1024;
 
 /** Feishu emoji type for typing indicator (same as Openclaw). */
 const TYPING_EMOJI = 'Typing';
@@ -2082,10 +2085,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
         for await (const chunk of readable) {
           const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           totalSize += buf.length;
-          if (totalSize > MAX_FILE_SIZE) {
-            writeStream.destroy();
+          if (totalSize > MAX_FILE_SIZE_DISK) {
+            await new Promise<void>((resolve) => { writeStream.end(() => resolve()); });
             try { fs.unlinkSync(destPath); } catch { /* cleanup */ }
-            console.warn(`[feishu-adapter] Resource too large (>${MAX_FILE_SIZE} bytes), key: ${fileKey}`);
+            console.warn(`[feishu-adapter] Resource too large (>${MAX_FILE_SIZE_DISK} bytes), key: ${fileKey}`);
             return null;
           }
           writeStream.write(buf);
@@ -2102,8 +2105,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
         try {
           await res.writeFile(tmpPath);
           const stat = fs.statSync(tmpPath);
-          if (stat.size > MAX_FILE_SIZE) {
-            console.warn(`[feishu-adapter] Resource too large (>${MAX_FILE_SIZE} bytes), key: ${fileKey}`);
+          if (stat.size > MAX_FILE_SIZE_DISK) {
+            console.warn(`[feishu-adapter] Resource too large (>${MAX_FILE_SIZE_DISK} bytes), key: ${fileKey}`);
             return null;
           }
           totalSize = stat.size;

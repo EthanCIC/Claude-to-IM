@@ -29,8 +29,8 @@ const DEDUP_MAX = 1000;
 /** Discord message character limit. */
 const DISCORD_CHAR_LIMIT = 2000;
 
-/** Default max attachment download size (20 MB). */
-const DEFAULT_MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024;
+/** Default max attachment download size (200 MB). */
+const DEFAULT_MAX_ATTACHMENT_SIZE = 200 * 1024 * 1024;
 
 /** Typing indicator interval (8s, Discord typing lasts ~10s). */
 const TYPING_INTERVAL_MS = 8000;
