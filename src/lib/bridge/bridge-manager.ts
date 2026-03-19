@@ -8,6 +8,7 @@
  */
 
 import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, UserRole, FileAttachment } from './types.js';
+import type { InterruptedTask, ActiveTaskInfo } from './host.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
 // Side-effect import: triggers self-registration of all adapter factories
@@ -418,6 +419,32 @@ function getState(): BridgeManagerState {
   return g[GLOBAL_KEY];
 }
 
+/** Notify host about active task changes (for runtime file sync). */
+function syncActiveTasksToHost(): void {
+  const { lifecycle } = getBridgeContext();
+  if (!lifecycle.onActiveTasksChanged) return;
+
+  const state = getState();
+  const allBindings = router.listBindings();
+  const sessionToBinding = new Map<string, ReturnType<typeof router.listBindings>[number]>();
+  for (const b of allBindings) {
+    sessionToBinding.set(b.codepilotSessionId, b);
+  }
+
+  const tasks: ActiveTaskInfo[] = [];
+  for (const [sessionId] of state.activeTasks) {
+    const binding = sessionToBinding.get(sessionId);
+    if (binding) {
+      tasks.push({
+        codepilotSessionId: binding.codepilotSessionId,
+        chatId: binding.chatId,
+        channelType: binding.channelType,
+      });
+    }
+  }
+  lifecycle.onActiveTasksChanged(tasks);
+}
+
 /**
  * Process a function with per-session serialization.
  * Different sessions run concurrently; same-session requests are serialized.
@@ -517,6 +544,7 @@ export async function start(): Promise<void> {
  */
 export async function notifyShutdown(): Promise<void> {
   const state = getState();
+  const { lifecycle } = getBridgeContext();
   if (state.activeTasks.size === 0) return;
 
   const allBindings = router.listBindings();
@@ -528,6 +556,8 @@ export async function notifyShutdown(): Promise<void> {
   }
 
   const notifications: Promise<void>[] = [];
+  const interruptedTasks: InterruptedTask[] = [];
+
   for (const [sessionId] of state.activeTasks) {
     const binding = sessionToBinding.get(sessionId);
     if (!binding) continue;
@@ -535,10 +565,18 @@ export async function notifyShutdown(): Promise<void> {
     const adapter = state.adapters.get(binding.channelType);
     if (!adapter) continue;
 
+    // Collect interrupted task info for recovery after restart
+    interruptedTasks.push({
+      codepilotSessionId: binding.codepilotSessionId,
+      chatId: binding.chatId,
+      channelType: binding.channelType,
+      timestamp: Date.now(),
+    });
+
     notifications.push(
       deliver(adapter, {
         address: { channelType: binding.channelType, chatId: binding.chatId },
-        text: 'Bot 正在重啟，稍後 @ 即可繼續對話。',
+        text: 'Bot 正在重啟，稍等。',
         parseMode: 'plain',
       }).then(() => {}, (err) => {
         console.warn(`[bridge-manager] Shutdown notification failed for ${binding.chatId}:`, err);
@@ -552,6 +590,87 @@ export async function notifyShutdown(): Promise<void> {
       Promise.allSettled(notifications),
       new Promise(resolve => setTimeout(resolve, 5000)),
     ]);
+  }
+
+  // Persist interrupted tasks for auto-recovery after restart
+  if (interruptedTasks.length > 0) {
+    lifecycle.onInterruptedTasks?.(interruptedTasks);
+  }
+}
+
+/**
+ * Recover tasks that were interrupted by a previous SIGTERM.
+ * Resumes each session with a "continue" prompt so the LLM completes its response.
+ * Runs sequentially to avoid resource contention.
+ */
+export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise<void> {
+  const state = getState();
+  if (!state.running) return;
+
+  for (const task of tasks) {
+    const adapter = state.adapters.get(task.channelType);
+    if (!adapter) {
+      console.warn(`[bridge-manager] Recovery skip: no adapter for ${task.channelType}`);
+      continue;
+    }
+
+    // Resolve binding — if binding is gone, skip
+    const binding = router.resolve({
+      channelType: task.channelType,
+      chatId: task.chatId,
+    });
+    if (!binding?.sdkSessionId) {
+      console.warn(`[bridge-manager] Recovery skip: no session for ${task.chatId}`);
+      continue;
+    }
+
+    const taskAbort = new AbortController();
+    state.activeTasks.set(binding.codepilotSessionId, taskAbort);
+    syncActiveTasksToHost();
+
+    try {
+      console.log(`[bridge-manager] Recovering task for ${task.chatId}...`);
+      const result = await engine.processMessage(
+        binding,
+        'Your previous response was interrupted by a system restart. Continue where you left off and complete your response.',
+        undefined,  // no permission callback during recovery
+        taskAbort.signal,
+      );
+
+      const isNoOp = !result.responseText || result.responseText.trim() === 'No response requested.';
+      if (!isNoOp) {
+        await deliverResponse(
+          adapter,
+          { channelType: task.channelType, chatId: task.chatId },
+          result.responseText,
+          binding.codepilotSessionId,
+        );
+      }
+
+      // Update sdkSessionId
+      if (binding.id) {
+        const update = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
+        if (update !== null) {
+          getBridgeContext().store.updateChannelBinding(binding.id, { sdkSessionId: update });
+        }
+      }
+
+      if (result.hasError) {
+        console.warn(`[bridge-manager] Recovery error for ${task.chatId}: ${result.errorMessage}`);
+        await deliver(adapter, {
+          address: { channelType: task.channelType, chatId: task.chatId },
+          text: '重啟後嘗試恢復上次的回覆失敗，請重新 @ 我。',
+          parseMode: 'plain',
+        }).catch(() => {});
+      } else {
+        console.log(`[bridge-manager] Recovery successful for ${task.chatId}`);
+      }
+    } catch (err) {
+      console.error(`[bridge-manager] Recovery failed for ${task.chatId}:`, err);
+    } finally {
+      state.activeTasks.delete(binding.codepilotSessionId);
+      syncActiveTasksToHost();
+    }
   }
 }
 
@@ -879,6 +998,7 @@ async function handleMessage(
   const taskAbort = new AbortController();
   const state = getState();
   state.activeTasks.set(binding.codepilotSessionId, taskAbort);
+  syncActiveTasksToHost();
 
   // ── Streaming preview setup ──────────────────────────────────
   let previewState: StreamingPreviewState | null = null;
@@ -1115,6 +1235,7 @@ async function handleMessage(
     }
 
     state.activeTasks.delete(binding.codepilotSessionId);
+    syncActiveTasksToHost();
     // Notify adapter that message processing ended
     adapter.onMessageEnd?.(msg.address.chatId, msg.messageId);
     // Commit the offset only after full processing (success or failure)
@@ -1274,6 +1395,7 @@ async function handleCommand(
       if (taskAbort) {
         taskAbort.abort();
         st.activeTasks.delete(binding.codepilotSessionId);
+        syncActiveTasksToHost();
         response = 'Stopping current task...';
       } else {
         response = 'No task is currently running.';

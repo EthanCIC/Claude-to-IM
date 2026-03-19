@@ -268,9 +268,28 @@ export interface PermissionGateway {
 
 // ── Host Interface: Lifecycle Hooks ──────────────────────────
 
+/** Info about a task interrupted by SIGTERM. */
+export interface InterruptedTask {
+  codepilotSessionId: string;
+  chatId: string;
+  channelType: string;
+  timestamp: number;
+}
+
+/** Lightweight info about a currently active task (for runtime file sync). */
+export interface ActiveTaskInfo {
+  codepilotSessionId: string;
+  chatId: string;
+  channelType: string;
+}
+
 export interface LifecycleHooks {
   /** Called when the bridge system starts (e.g., to suppress competing polling). */
   onBridgeStart?(): void;
   /** Called when the bridge system stops. */
   onBridgeStop?(): void;
+  /** Called during shutdown with info about interrupted in-flight tasks. */
+  onInterruptedTasks?(tasks: InterruptedTask[]): void;
+  /** Called whenever the set of active tasks changes (for runtime file sync). */
+  onActiveTasksChanged?(tasks: ActiveTaskInfo[]): void;
 }
