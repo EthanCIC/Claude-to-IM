@@ -646,7 +646,7 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
         // No streaming during recovery — just get the complete response
         const result = await engine.processMessage(
           binding,
-          'Your previous response was interrupted by a system restart. Continue where you left off and complete your response.',
+          'Your previous response was interrupted by a system restart. The user did NOT receive your last message or any pending tool call results. Re-do your response from scratch: re-run any tool calls and deliver the complete answer.',
           undefined,  // no permission callback during recovery
           taskAbort.signal,
         );
