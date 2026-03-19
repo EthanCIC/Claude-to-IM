@@ -657,15 +657,21 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
         if (!isNoOp && hasPreviewCard) {
           // PATCH the interrupted card with complete response text.
           // endPreview handles overflow (sends additional messages if needed).
-          const patchResult = await adapter.sendPreview!(task.chatId, result.responseText, 0).catch(() => 'skip' as const);
+          const patchResult = await adapter.sendPreview!(task.chatId, result.responseText, 0).catch((err) => {
+            console.warn(`[bridge-manager] Recovery PATCH failed:`, err instanceof Error ? err.message : err);
+            return 'skip' as const;
+          });
           adapter.endPreview?.(task.chatId, 0);
+          console.log(`[bridge-manager] Recovery PATCH result: ${patchResult}`);
           if (patchResult === 'sent') {
             // Notify user the card above was updated (they won't see the PATCH otherwise)
             await deliver(adapter, {
               address: { channelType: task.channelType, chatId: task.chatId },
               text: '(已恢復，回覆已更新至上方卡片)',
               parseMode: 'plain',
-            }).catch(() => {});
+            }).catch((err) => {
+              console.warn(`[bridge-manager] Recovery notification failed:`, err instanceof Error ? err.message : err);
+            });
           } else {
             // PATCH failed — fall back to normal delivery
             await deliverResponse(
