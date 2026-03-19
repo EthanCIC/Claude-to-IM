@@ -203,6 +203,12 @@ export interface BridgeStore {
   /** Return per-group system prompt context for a chat, or null if none configured. */
   getGroupContext?(channelType: string, chatId: string): string | null;
 
+  // ── Group metadata (chat name, description, type) ──
+  /** Store chat metadata (name, description) for a chat. */
+  setGroupMetadata?(chatId: string, metadata: { name: string; description: string; chatType: string }): void;
+  /** Retrieve chat metadata, or null if not loaded. */
+  getGroupMetadata?(chatId: string): { name: string; description: string; chatType: string } | null;
+
   // ── Group members (for outbound @mention resolution) ──
   /** Store the list of mentionable users for a chat (called by adapters after loading members). */
   setGroupMembers?(chatId: string, members: Array<{ id: string; name: string }>): void;

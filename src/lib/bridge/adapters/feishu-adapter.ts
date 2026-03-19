@@ -126,6 +126,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private userNameCache = new Map<string, string>();
   /** Cache: chat_id set of chats whose members have been loaded. */
   private membersCachedChats = new Set<string>();
+  /** Cache: chat_id set of chats whose metadata has been loaded. */
+  private metadataCachedChats = new Set<string>();
   /** Disable Contact API calls after first failure (missing scopes). */
   private contactApiDisabled = false;
   /** Track active typing reaction IDs per message for cleanup. */
@@ -323,9 +325,39 @@ export class FeishuAdapter extends BaseChannelAdapter {
       // Publish to store so conversation-engine can inject into system prompt
       const { store } = getBridgeContext();
       store.setGroupMembers?.(chatId, chatMembers);
+
+      // On-demand metadata load for chats not seen during preload
+      if (!this.metadataCachedChats.has(chatId)) {
+        this.loadChatMetadata(chatId).catch(() => {});
+      }
     } catch (err) {
       console.warn(
         '[feishu-adapter] Failed to load chat members for chatId:', chatId,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  /**
+   * Load chat metadata (name, description, type) via im.chat.get.
+   * Called on-demand for chats not seen during preload.
+   */
+  protected async loadChatMetadata(chatId: string): Promise<void> {
+    if (this.metadataCachedChats.has(chatId) || !this.restClient) return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resp: any = await this.restClient.im.chat.get({
+        path: { chat_id: chatId },
+      });
+      const name = resp?.data?.name || '';
+      const description = resp?.data?.description || '';
+      const chatType = resp?.data?.chat_type || '';
+      this.metadataCachedChats.add(chatId);
+      const { store } = getBridgeContext();
+      store.setGroupMetadata?.(chatId, { name, description, chatType });
+    } catch (err) {
+      console.warn(
+        '[feishu-adapter] Failed to load chat metadata for chatId:', chatId,
         err instanceof Error ? err.message : err,
       );
     }
@@ -362,9 +394,20 @@ export class FeishuAdapter extends BaseChannelAdapter {
           },
         });
         const items = resp?.data?.items;
+        const { store } = getBridgeContext();
         if (Array.isArray(items)) {
           for (const chat of items) {
-            if (chat.chat_id) chatIds.push(chat.chat_id);
+            if (chat.chat_id) {
+              chatIds.push(chat.chat_id);
+              // Extract metadata from list response (free, no extra API call)
+              if (!this.metadataCachedChats.has(chat.chat_id)) {
+                const name = chat.name || '';
+                const description = chat.description || '';
+                const chatType = chat.chat_type || '';
+                this.metadataCachedChats.add(chat.chat_id);
+                store.setGroupMetadata?.(chat.chat_id, { name, description, chatType });
+              }
+            }
           }
         }
         pageToken = resp?.data?.page_token || undefined;
