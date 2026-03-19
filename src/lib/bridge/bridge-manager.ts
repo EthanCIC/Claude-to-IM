@@ -628,21 +628,14 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
       continue;
     }
 
-    const hasPreviewCard = !!task.previewMessageId && !!adapter.sendPreview;
-
     // Use session lock to serialize with any incoming messages
     await processWithSessionLock(binding.codepilotSessionId, async () => {
-      // Seed preview message ID so final PATCH goes to the interrupted card
-      if (hasPreviewCard && adapter.seedPreviewMessageId) {
-        adapter.seedPreviewMessageId(task.chatId, task.previewMessageId!);
-      }
-
       const taskAbort = new AbortController();
       state.activeTasks.set(binding.codepilotSessionId, taskAbort);
       syncActiveTasksToHost();
 
       try {
-        console.log(`[bridge-manager] Recovering task for ${task.chatId}${hasPreviewCard ? ' (will PATCH card)' : ''}...`);
+        console.log(`[bridge-manager] Recovering task for ${task.chatId}...`);
         // No streaming during recovery — just get the complete response
         const result = await engine.processMessage(
           binding,
@@ -654,25 +647,9 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
         const isNoOp = !result.responseText || result.responseText.trim() === 'No response requested.';
         console.log(`[bridge-manager] Recovery response: ${result.responseText?.length ?? 0} chars, hasError=${result.hasError}, sdkSessionId=${result.sdkSessionId?.slice(0, 8) ?? 'none'}`);
 
-        if (!isNoOp && hasPreviewCard) {
-          // PATCH the interrupted card with complete response text.
-          // endPreview handles overflow (sends additional messages if needed).
-          const patchResult = await adapter.sendPreview!(task.chatId, result.responseText, 0).catch((err) => {
-            console.warn(`[bridge-manager] Recovery PATCH failed:`, err instanceof Error ? err.message : err);
-            return 'skip' as const;
-          });
-          adapter.endPreview?.(task.chatId, 0);
-          console.log(`[bridge-manager] Recovery PATCH result: ${patchResult}`);
-          if (patchResult !== 'sent') {
-            // PATCH failed — fall back to normal delivery
-            await deliverResponse(
-              adapter,
-              { channelType: task.channelType, chatId: task.chatId },
-              result.responseText,
-              binding.codepilotSessionId,
-            );
-          }
-        } else if (!isNoOp) {
+        // Always deliver as new message — don't PATCH the interrupted card.
+        // The interrupted card keeps its partial content; recovery appears below it.
+        if (!isNoOp) {
           await deliverResponse(
             adapter,
             { channelType: task.channelType, chatId: task.chatId },
