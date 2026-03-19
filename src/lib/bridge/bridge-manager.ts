@@ -431,6 +431,51 @@ export async function start(): Promise<void> {
 /**
  * Stop the bridge system gracefully.
  */
+/**
+ * Notify all chats with in-flight tasks that the bot is restarting (ETH-78).
+ * Best-effort: failures are logged but do not block shutdown.
+ * Must be called BEFORE stop() so adapters are still alive.
+ */
+export async function notifyShutdown(): Promise<void> {
+  const state = getState();
+  if (state.activeTasks.size === 0) return;
+
+  const allBindings = router.listBindings();
+
+  // Reverse-map codepilotSessionId → binding
+  const sessionToBinding = new Map<string, ReturnType<typeof router.listBindings>[number]>();
+  for (const b of allBindings) {
+    sessionToBinding.set(b.codepilotSessionId, b);
+  }
+
+  const notifications: Promise<void>[] = [];
+  for (const [sessionId] of state.activeTasks) {
+    const binding = sessionToBinding.get(sessionId);
+    if (!binding) continue;
+
+    const adapter = state.adapters.get(binding.channelType);
+    if (!adapter) continue;
+
+    notifications.push(
+      deliver(adapter, {
+        address: { channelType: binding.channelType, chatId: binding.chatId },
+        text: 'Bot 正在重啟，稍後 @ 即可繼續對話。',
+        parseMode: 'plain',
+      }).then(() => {}, (err) => {
+        console.warn(`[bridge-manager] Shutdown notification failed for ${binding.chatId}:`, err);
+      }),
+    );
+  }
+
+  if (notifications.length > 0) {
+    console.log(`[bridge-manager] Sending shutdown notifications to ${notifications.length} active chat(s)...`);
+    await Promise.race([
+      Promise.allSettled(notifications),
+      new Promise(resolve => setTimeout(resolve, 5000)),
+    ]);
+  }
+}
+
 export async function stop(): Promise<void> {
   const state = getState();
   if (!state.running) return;
@@ -920,10 +965,13 @@ async function handleMessage(
     const isNoOpResponse = result.responseText.trim() === 'No response requested.';
     if (result.responseText && !previewHandledDelivery && !isNoOpResponse) {
       await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
-    } else if (result.hasError) {
+    }
+    // Error notification — independent check, never swallowed by responseText (ETH-78)
+    if (result.hasError) {
+      const errorText = result.errorMessage || 'Unknown error';
       const errorResponse: OutboundMessage = {
         address: msg.address,
-        text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
+        text: `<b>Error:</b> ${escapeHtml(errorText)}\n\nSession 已重置，下次訊息將開啟新對話。`,
         parseMode: 'HTML',
         replyToMessageId: msg.messageId,
       };
