@@ -566,7 +566,7 @@ export async function notifyShutdown(): Promise<void> {
     if (!adapter) continue;
 
     // Don't clear typing indicator — let it persist through restart.
-    // Recovery's finally block will clear it when done.
+    // Stale emoji is acceptable; next normal message cycle resets it.
 
     // Collect interrupted task info for recovery after restart
     interruptedTasks.push({
@@ -574,7 +574,6 @@ export async function notifyShutdown(): Promise<void> {
       chatId: binding.chatId,
       channelType: binding.channelType,
       timestamp: Date.now(),
-      previewMessageId: adapter.getPreviewMessageId?.(binding.chatId),
     });
 
     notifications.push(

@@ -274,8 +274,6 @@ export interface InterruptedTask {
   chatId: string;
   channelType: string;
   timestamp: number;
-  /** Platform message ID of the in-flight preview card, if any. */
-  previewMessageId?: string;
 }
 
 /** Lightweight info about a currently active task (for runtime file sync). */
