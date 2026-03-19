@@ -650,13 +650,12 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
 
         const isNoOp = !result.responseText || result.responseText.trim() === 'No response requested.';
 
-        if (!isNoOp) {
-          // PATCH the interrupted card to mark it as recovered
-          if (hasPreviewCard) {
-            await adapter.sendPreview!(task.chatId, '*(已恢復，完整回覆如下)*', 0).catch(() => {});
-            adapter.endPreview?.(task.chatId, 0);
-          }
-          // Send full response via normal delivery (proper chunking/formatting)
+        if (!isNoOp && hasPreviewCard) {
+          // PATCH the interrupted card with complete response text.
+          // endPreview handles overflow (sends additional messages if needed).
+          await adapter.sendPreview!(task.chatId, result.responseText, 0).catch(() => {});
+          adapter.endPreview?.(task.chatId, 0);
+        } else if (!isNoOp) {
           await deliverResponse(
             adapter,
             { channelType: task.channelType, chatId: task.chatId },
