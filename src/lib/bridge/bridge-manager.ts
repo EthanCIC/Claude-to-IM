@@ -663,16 +663,7 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
           });
           adapter.endPreview?.(task.chatId, 0);
           console.log(`[bridge-manager] Recovery PATCH result: ${patchResult}`);
-          if (patchResult === 'sent') {
-            // Notify user the card above was updated (they won't see the PATCH otherwise)
-            await deliver(adapter, {
-              address: { channelType: task.channelType, chatId: task.chatId },
-              text: '(已恢復，回覆已更新至上方卡片)',
-              parseMode: 'plain',
-            }).catch((err) => {
-              console.warn(`[bridge-manager] Recovery notification failed:`, err instanceof Error ? err.message : err);
-            });
-          } else {
+          if (patchResult !== 'sent') {
             // PATCH failed — fall back to normal delivery
             await deliverResponse(
               adapter,
