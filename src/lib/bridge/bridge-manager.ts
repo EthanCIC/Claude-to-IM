@@ -30,6 +30,74 @@ import {
 
 const GLOBAL_KEY = '__bridge_manager__';
 
+// ── Message envelope helpers ─────────────────────────────────
+
+/** Strip brackets and collapse whitespace so user text can't break the header. */
+function sanitizeHeaderPart(value: string): string {
+  return value.replace(/[[\]]/g, (ch) => (ch === '[' ? '(' : ')'))
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/** Format elapsed duration between two messages. Returns `undefined` when invalid/negative. */
+function formatElapsed(durationMs: number): string | undefined {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return undefined;
+  const sec = Math.floor(durationMs / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  return `${day}d`;
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+
+/** Format a unix-ms timestamp as `Wed 2026-03-19 23:50 CST` in host-local time. */
+function formatTimestamp(ts: number): string {
+  const d = new Date(ts);
+  const wday = WEEKDAYS[d.getDay()];
+  const yyyy = d.getFullYear();
+  const MM = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  // Extract short timezone name (e.g. "CST", "PST")
+  const tz = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+    .formatToParts(d)
+    .find(p => p.type === 'timeZoneName')?.value ?? '';
+  return `${wday} ${yyyy}-${MM}-${dd} ${hh}:${mm} ${tz}`;
+}
+
+interface EnvelopeParams {
+  channelType: string;
+  isGroup: boolean;
+  displayName: string | undefined;
+  body: string;
+  timestamp: number;
+  previousTimestamp?: number;
+}
+
+/** Build `[Channel From +elapsed Weekday Timestamp] Body` envelope string. */
+function formatEnvelope(params: EnvelopeParams): string {
+  const channel = sanitizeHeaderPart(params.channelType.charAt(0).toUpperCase() + params.channelType.slice(1));
+  const from = params.isGroup
+    ? 'GROUP'
+    : sanitizeHeaderPart(params.displayName || 'DM');
+  const elapsed = (params.previousTimestamp != null)
+    ? formatElapsed(params.timestamp - params.previousTimestamp)
+    : undefined;
+  const elapsedStr = elapsed ? ` +${elapsed}` : '';
+  const ts = formatTimestamp(params.timestamp);
+  const header = `[${channel} ${from}${elapsedStr} ${ts}]`;
+  const body = params.isGroup && params.displayName
+    ? `${sanitizeHeaderPart(params.displayName)}: ${params.body}`
+    : params.body;
+  return `${header} ${body}`;
+}
+
 // ── Observe mode (group chat context buffer) ──────────────────
 
 /** Max observe messages to buffer per chat before oldest are dropped. */
@@ -37,23 +105,34 @@ const OBSERVE_BUFFER_MAX = 50;
 
 /** Per-chat buffer of observe-only messages (group chats without @mention). */
 interface ObserveEntry {
+  timestamp: number;
+  channelType: string;
+  displayName: string | undefined;
   text: string;
 }
 const observeBuffers = new Map<string, ObserveEntry[]>();
 
+/** Last message timestamp per chat for elapsed calculation. */
+const lastMessageTimestamps = new Map<string, number>();
+
 /**
  * Add an observe-only message to the per-chat buffer.
- * Format: "[Name] text" or "[userId] text" if no display name.
+ * Stores raw fields so the caller can format envelopes when draining.
  */
-function bufferObserveMessage(chatId: string, displayName: string | undefined, userId: string | undefined, text: string): void {
-  const label = displayName || userId || 'unknown';
-  const line = `[${label}] ${text}`;
+function bufferObserveMessage(
+  chatId: string,
+  displayName: string | undefined,
+  _userId: string | undefined,
+  text: string,
+  timestamp: number,
+  channelType: string,
+): void {
   let buf = observeBuffers.get(chatId);
   if (!buf) {
     buf = [];
     observeBuffers.set(chatId, buf);
   }
-  buf.push({ text: line });
+  buf.push({ timestamp, channelType, displayName, text });
   // Ring buffer: drop oldest when full
   if (buf.length > OBSERVE_BUFFER_MAX) {
     buf.splice(0, buf.length - OBSERVE_BUFFER_MAX);
@@ -61,15 +140,15 @@ function bufferObserveMessage(chatId: string, displayName: string | undefined, u
 }
 
 /**
- * Drain and return all buffered observe messages for a chat.
+ * Drain and return all buffered observe entries for a chat.
  * Returns null if buffer is empty.
  */
-function drainObserveBuffer(chatId: string): string | null {
+function drainObserveBuffer(chatId: string): ObserveEntry[] | null {
   const buf = observeBuffers.get(chatId);
   if (!buf || buf.length === 0) return null;
-  const text = buf.map(e => e.text).join('\n');
+  const entries = [...buf];
   observeBuffers.delete(chatId);
-  return text;
+  return entries;
 }
 
 function hasObserveBuffer(chatId: string): boolean {
@@ -507,8 +586,9 @@ export async function stop(): Promise<void> {
   // Clear all pending permission expiry timers
   broker.clearAllPermissionTimers();
 
-  // Clear observe buffers (in-memory, no need to persist)
+  // Clear observe buffers and timestamp tracking (in-memory, no need to persist)
   observeBuffers.clear();
+  lastMessageTimestamps.clear();
 
   // Notify host that bridge stopped
   lifecycle.onBridgeStop?.();
@@ -710,7 +790,8 @@ async function handleMessage(
 
   // Observe-only messages: buffer for context, don't trigger LLM
   if (msg.observeOnly) {
-    bufferObserveMessage(msg.address.chatId, msg.address.displayName, msg.address.userId, msg.text.trim());
+    bufferObserveMessage(msg.address.chatId, msg.address.displayName, msg.address.userId, msg.text.trim(), msg.timestamp, adapter.channelType);
+    lastMessageTimestamps.set(msg.address.chatId, msg.timestamp);
     ack();
     return;
   }
@@ -883,20 +964,42 @@ async function handleMessage(
     // Use text or empty string for image-only messages (prompt is still required by streamClaude)
     const rawPrompt = text || (hasAttachments ? 'Describe this image.' : '');
 
-    // Prepend buffered observe-only messages as group chat context
-    const observeText = drainObserveBuffer(msg.address.chatId);
-    const contextPrefix = observeText
-      ? `[Recent group messages]\n${observeText}\n\n`
-      : '';
+    // Build message envelope with timestamp, elapsed, and channel metadata
+    const observeEntries = drainObserveBuffer(msg.address.chatId);
+    const prevTs = lastMessageTimestamps.get(msg.address.chatId);
+
+    const currentEnvelope = formatEnvelope({
+      channelType: adapter.channelType,
+      isGroup: msg.address.isGroup ?? false,
+      displayName: msg.address.displayName,
+      body: rawPrompt,
+      timestamp: msg.timestamp,
+      previousTimestamp: prevTs,
+    });
+
+    let promptText: string;
+    if (observeEntries && observeEntries.length > 0) {
+      const historyLines = observeEntries.map((entry, i) => {
+        const entryPrevTs = i === 0 ? prevTs : observeEntries[i - 1].timestamp;
+        return formatEnvelope({
+          channelType: entry.channelType,
+          isGroup: true,
+          displayName: entry.displayName,
+          body: entry.text,
+          timestamp: entry.timestamp,
+          previousTimestamp: entryPrevTs,
+        });
+      });
+      promptText = `[Chat messages since your last reply - for context]\n${historyLines.join('\n')}\n[Current message - respond to this]\n${currentEnvelope}`;
+    } else {
+      promptText = currentEnvelope;
+    }
+
+    // Update timestamp for next message's elapsed calculation
+    lastMessageTimestamps.set(msg.address.chatId, msg.timestamp);
 
     // Observe attachments are now disk-first (paths in text), only current message has inline attachments
     const allAttachments: FileAttachment[] = hasAttachments ? msg.attachments! : [];
-
-    // Prefix the prompt with sender identity so the LLM always knows who is speaking
-    const senderPrefix = msg.address.displayName
-      ? `[Message from: ${msg.address.displayName}]\n`
-      : '';
-    const promptText = `${contextPrefix}${senderPrefix}${rawPrompt}`;
 
     const userRole = resolveUserRole(adapter.channelType, msg.address.userId);
 
