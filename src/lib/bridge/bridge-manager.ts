@@ -636,6 +636,8 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
 
       try {
         console.log(`[bridge-manager] Recovering task for ${task.chatId}...`);
+        // Show typing indicator during recovery
+        adapter.onMessageStart?.(task.chatId);
         // No streaming during recovery — just get the complete response
         const result = await engine.processMessage(
           binding,
@@ -679,6 +681,7 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
       } catch (err) {
         console.error(`[bridge-manager] Recovery failed for ${task.chatId}:`, err);
       } finally {
+        adapter.onMessageEnd?.(task.chatId);
         state.activeTasks.delete(binding.codepilotSessionId);
         syncActiveTasksToHost();
       }
