@@ -635,12 +635,30 @@ export async function recoverInterruptedTasks(tasks: InterruptedTask[]): Promise
 
       try {
         console.log(`[bridge-manager] Recovering task for ${task.chatId}...`);
-        // No streaming during recovery — just get the complete response
+        // Recovery permission handler: immediately deny AskUserQuestion and any
+        // other tool that bypasses role checks and goes straight to forwardAndWait.
+        // Without this, PendingPermissions' 5-minute timeout blocks recovery.
+        const recoveryPermHandler = async (perm: { permissionRequestId: string }) => {
+          const { permissions } = getBridgeContext();
+          permissions.resolvePendingPermission(perm.permissionRequestId, {
+            behavior: 'deny',
+            message: 'Auto-denied during recovery (no interactive user)',
+          });
+        };
+        // Use 'regular' role so non-whitelisted tools are silently denied
+        // instead of falling into legacy-mode forwardAndWait (which hangs
+        // for 5 minutes when no one resolves the permission request).
+        // recoveryPermHandler is still needed for AskUserQuestion, which
+        // always goes to forwardAndWait regardless of role.
         const result = await engine.processMessage(
           binding,
           'continue',
-          undefined,  // no permission callback during recovery
+          recoveryPermHandler,
           taskAbort.signal,
+          undefined,  // files
+          undefined,  // onPartialText
+          undefined,  // onToolUse
+          'regular' as UserRole,
         );
 
         const isNoOp = !result.responseText || result.responseText.trim() === 'No response requested.';
