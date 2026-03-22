@@ -936,15 +936,21 @@ async function handleMessage(
     return;
   }
 
-  // Observe-only messages: buffer for context, don't trigger LLM
+  // Allow /stop and /cancel even without @mention (observe-only) — these are
+  // control commands that should work without waking the LLM.
+  const rawText = msg.text.trim();
   if (msg.observeOnly) {
-    bufferObserveMessage(msg.address.chatId, msg.address.displayName, msg.address.userId, msg.text.trim(), msg.timestamp, adapter.channelType);
+    const cmdText = rawText.replace(/^@\S+\s+/, '');
+    if (cmdText === '/stop' || cmdText === '/cancel') {
+      await handleCommand(adapter, msg, cmdText);
+      ack();
+      return;
+    }
+    bufferObserveMessage(msg.address.chatId, msg.address.displayName, msg.address.userId, rawText, msg.timestamp, adapter.channelType);
     lastMessageTimestamps.set(msg.address.chatId, msg.timestamp);
     ack();
     return;
   }
-
-  const rawText = msg.text.trim();
   const hasAttachments = msg.attachments && msg.attachments.length > 0;
 
   // Check if this chat has a pending "Other" text answer (admin-only when roles configured)
