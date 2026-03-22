@@ -388,10 +388,15 @@ async function consumeStream(
             break;
           }
 
-          case 'error':
-            hasError = true;
-            errorMessage = event.data || 'Unknown error';
+          case 'error': {
+            const errMsg = event.data || 'Unknown error';
+            const abortByUser = errMsg === 'Claude Code process aborted by user';
+            if (!abortByUser) {
+              hasError = true;
+            }
+            errorMessage = errMsg;
             break;
+          }
 
           case 'result': {
             try {
@@ -441,6 +446,7 @@ async function consumeStream(
       .join('')
       .trim();
 
+    const isAbort = errorMessage === 'Claude Code process aborted by user';
     return {
       responseText,
       tokenUsage,
@@ -448,6 +454,7 @@ async function consumeStream(
       errorMessage,
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
+      isAbort,
     };
   } catch (e) {
     // Best-effort save on stream error
