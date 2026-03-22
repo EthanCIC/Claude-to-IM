@@ -906,6 +906,22 @@ async function handleMessage(
       }
     }
 
+    // Audit: permission decision
+    if (handled) {
+      const permId = msg.callbackData.startsWith('askq:')
+        ? msg.callbackData.split(':')[1]
+        : msg.callbackData.startsWith('askq_other:')
+          ? msg.callbackData.split(':')[1]
+          : msg.callbackData.split(':').slice(2).join(':');
+      store.insertAuditLog({
+        channelType: adapter.channelType,
+        chatId: msg.address.chatId,
+        direction: 'inbound',
+        messageId: msg.messageId,
+        summary: `[PERM] ${resolveAction || 'answered'} permId=${permId.slice(0, 12)} by=${msg.address.userId?.slice(0, 8) || 'unknown'}`,
+      });
+    }
+
     // Patch the original card so all group members see the resolved state
     if (handled && resolveAction && adapter.resolvePermissionCard && msg.callbackMessageId) {
       const permId = msg.callbackData.startsWith('askq:')
@@ -1028,6 +1044,15 @@ async function handleMessage(
 
   // Regular message — route to conversation engine
   const binding = router.resolve(msg.address);
+
+  // Audit: task start
+  store.insertAuditLog({
+    channelType: adapter.channelType,
+    chatId: msg.address.chatId,
+    direction: 'inbound',
+    messageId: msg.messageId,
+    summary: `[TASK_START] session=${binding.codepilotSessionId.slice(0, 8)} sdk=${binding.sdkSessionId?.slice(0, 8) || 'none'}`,
+  });
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
   adapter.onMessageStart?.(msg.address.chatId, msg.messageId);
@@ -1192,6 +1217,13 @@ async function handleMessage(
     // /stop handler already replied "已停止當前任務。" so no extra notification needed.
     // `return` inside try triggers the finally block for preview cleanup.
     if (result.isAbort) {
+      store.insertAuditLog({
+        channelType: adapter.channelType,
+        chatId: msg.address.chatId,
+        direction: 'inbound',
+        messageId: msg.messageId,
+        summary: `[ABORT] Task stopped by user, session preserved`,
+      });
       if (binding.id && result.sdkSessionId) {
         store.updateChannelBinding(binding.id, { sdkSessionId: result.sdkSessionId });
       }
@@ -1241,6 +1273,13 @@ async function handleMessage(
     // Error notification — independent check, never swallowed by responseText (ETH-78)
     if (result.hasError) {
       const errorText = result.errorMessage || 'Unknown error';
+      store.insertAuditLog({
+        channelType: adapter.channelType,
+        chatId: msg.address.chatId,
+        direction: 'outbound',
+        messageId: msg.messageId,
+        summary: `[ERROR] ${errorText.slice(0, 150)}`,
+      });
       const errorResponse: OutboundMessage = {
         address: msg.address,
         text: `<b>Error:</b> ${escapeHtml(errorText)}\n\nSession 已重置，下次訊息將開啟新對話。`,
@@ -1260,6 +1299,13 @@ async function handleMessage(
           const prev = binding.sdkSessionId || '(empty)';
           if (update !== binding.sdkSessionId) {
             console.log(`[bridge-manager] sdkSessionId change for ${msg.address.chatId}: ${prev} → ${update || '(cleared)'}`);
+            store.insertAuditLog({
+              channelType: adapter.channelType,
+              chatId: msg.address.chatId,
+              direction: 'outbound',
+              messageId: msg.messageId,
+              summary: `[SDK_SESSION] ${prev.slice(0, 8)} → ${update ? update.slice(0, 8) : '(cleared)'}${result.hasError ? ' (error reset)' : ''}`,
+            });
           }
           store.updateChannelBinding(binding.id, { sdkSessionId: update });
         }
@@ -1289,6 +1335,13 @@ async function handleMessage(
 
     state.activeTasks.delete(binding.codepilotSessionId);
     syncActiveTasksToHost();
+    store.insertAuditLog({
+      channelType: adapter.channelType,
+      chatId: msg.address.chatId,
+      direction: 'outbound',
+      messageId: msg.messageId,
+      summary: `[TASK_END] session=${binding.codepilotSessionId.slice(0, 8)}`,
+    });
     // Notify adapter that message processing ended
     adapter.onMessageEnd?.(msg.address.chatId, msg.messageId);
     // Commit the offset only after full processing (success or failure)
@@ -1364,6 +1417,13 @@ async function handleCommand(
         workDir = validated;
       }
       const binding = router.createBinding(msg.address, workDir);
+      store.insertAuditLog({
+        channelType: adapter.channelType,
+        chatId: msg.address.chatId,
+        direction: 'inbound',
+        messageId: msg.messageId,
+        summary: `[CMD] /new → session=${binding.codepilotSessionId.slice(0, 8)} cwd=${binding.workingDirectory || '~'}`,
+      });
       response = `New session created.\nSession: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>\nCWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`;
       break;
     }
@@ -1379,6 +1439,13 @@ async function handleCommand(
       }
       const binding = router.bindToSession(msg.address, args);
       if (binding) {
+        store.insertAuditLog({
+          channelType: adapter.channelType,
+          chatId: msg.address.chatId,
+          direction: 'inbound',
+          messageId: msg.messageId,
+          summary: `[CMD] /bind → session=${args.slice(0, 8)}`,
+        });
         response = `Bound to session <code>${args.slice(0, 8)}...</code>`;
       } else {
         response = 'Session not found.';
@@ -1398,6 +1465,13 @@ async function handleCommand(
       }
       const binding = router.resolve(msg.address);
       router.updateBinding(binding.id, { workingDirectory: validatedPath });
+      store.insertAuditLog({
+        channelType: adapter.channelType,
+        chatId: msg.address.chatId,
+        direction: 'inbound',
+        messageId: msg.messageId,
+        summary: `[CMD] /cwd → ${validatedPath}`,
+      });
       response = `Working directory set to <code>${escapeHtml(validatedPath)}</code>`;
       break;
     }
@@ -1409,6 +1483,13 @@ async function handleCommand(
       }
       const binding = router.resolve(msg.address);
       router.updateBinding(binding.id, { mode: args });
+      store.insertAuditLog({
+        channelType: adapter.channelType,
+        chatId: msg.address.chatId,
+        direction: 'inbound',
+        messageId: msg.messageId,
+        summary: `[CMD] /mode → ${args}`,
+      });
       response = `Mode set to <b>${args}</b>`;
       break;
     }
@@ -1450,6 +1531,13 @@ async function handleCommand(
         taskAbort.abort();
         st.activeTasks.delete(binding.codepilotSessionId);
         syncActiveTasksToHost();
+        store.insertAuditLog({
+          channelType: adapter.channelType,
+          chatId: msg.address.chatId,
+          direction: 'inbound',
+          messageId: msg.messageId,
+          summary: `[CMD] ${command} → task aborted, session=${binding.codepilotSessionId.slice(0, 8)}`,
+        });
         response = '已停止當前任務。';
       } else {
         response = 'No task is currently running.';
@@ -1486,6 +1574,13 @@ async function handleCommand(
             });
           }
         }
+        store.insertAuditLog({
+          channelType: adapter.channelType,
+          chatId: msg.address.chatId,
+          direction: 'inbound',
+          messageId: msg.messageId,
+          summary: `[CMD] /perm ${permAction} → permId=${permId.slice(0, 12)}`,
+        });
         response = `Permission ${permAction}: recorded.`;
       } else {
         response = `Permission not found or already resolved.`;
