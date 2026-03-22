@@ -996,8 +996,11 @@ async function handleMessage(
   }
 
   // Check for IM commands (before sanitization — commands are validated individually)
-  if (rawText.startsWith('/')) {
-    await handleCommand(adapter, msg, rawText);
+  // In group chats, messages arrive as "@BotName /stop" — strip the leading @mention
+  // so the slash command is recognized.
+  const commandText = rawText.replace(/^@\S+\s+/, '');
+  if (commandText.startsWith('/')) {
+    await handleCommand(adapter, msg, commandText);
     ack();
     return;
   }
