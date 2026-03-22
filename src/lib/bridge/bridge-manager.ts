@@ -936,12 +936,12 @@ async function handleMessage(
     return;
   }
 
-  // Allow /stop and /cancel even without @mention (observe-only) — these are
-  // control commands that should work without waking the LLM.
+  // Allow control/info commands even without @mention (observe-only) — these
+  // should work without waking the LLM.
   const rawText = msg.text.trim();
   if (msg.observeOnly) {
     const cmdText = rawText.replace(/^@\S+\s+/, '');
-    if (cmdText === '/stop' || cmdText === '/cancel') {
+    if (cmdText === '/stop' || cmdText === '/cancel' || cmdText === '/help') {
       await handleCommand(adapter, msg, cmdText);
       ack();
       return;
