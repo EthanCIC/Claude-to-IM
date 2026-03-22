@@ -210,7 +210,9 @@ export async function processMessage(
     // Subagents are isolated CLI subprocesses that cannot execute MCP tools (permission not inherited).
     // Loading MCP schemas via ToolSearch wastes 75-86K context tokens for nothing.
     const mcpSubagentRule = 'Do NOT delegate MCP tool operations (Lark/Feishu API, document editing, Bitable, messaging, etc.) to subagents via the Agent tool. Subagents are isolated subprocesses that cannot execute MCP tools — they will be denied and waste context loading schemas. Perform all MCP operations directly in the main session. Only delegate tasks that use local tools (file reads, code search, analysis, Bash commands).';
-    const appendParts = [session?.system_prompt, groupContext, membersContext, channelContext, mcpSubagentRule].filter(Boolean);
+    // SendMessage tool goes to void in bridge sessions — text output is the reply channel.
+    const sendMessageRule = 'Your text output IS the reply channel — the bridge automatically renders it as an interactive card in the chat. Do NOT use the SendMessage tool to reply; it will be blocked. For cross-chat messaging, use the send-message-to-lark skill.';
+    const appendParts = [session?.system_prompt, groupContext, membersContext, channelContext, mcpSubagentRule, sendMessageRule].filter(Boolean);
     const systemPrompt = {
       type: 'preset' as const,
       preset: 'claude_code' as const,
