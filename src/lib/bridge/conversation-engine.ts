@@ -470,8 +470,9 @@ async function consumeStream(
       }
     }
 
-    const isAbort = e instanceof DOMException && e.name === 'AbortError'
-      || e instanceof Error && e.name === 'AbortError';
+    const isAbort = (e instanceof DOMException && e.name === 'AbortError')
+      || (e instanceof Error && e.name === 'AbortError')
+      || (e instanceof Error && e.message === 'Claude Code process aborted by user');
 
     return {
       responseText: '',
