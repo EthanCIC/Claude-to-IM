@@ -1257,6 +1257,10 @@ async function handleMessage(
       try {
         const update = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
         if (update !== null) {
+          const prev = binding.sdkSessionId || '(empty)';
+          if (update !== binding.sdkSessionId) {
+            console.log(`[bridge-manager] sdkSessionId change for ${msg.address.chatId}: ${prev} → ${update || '(cleared)'}`);
+          }
           store.updateChannelBinding(binding.id, { sdkSessionId: update });
         }
       } catch { /* best effort */ }
