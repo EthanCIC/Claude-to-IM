@@ -56,6 +56,8 @@ export interface ConversationResult {
   permissionRequests: PermissionRequestInfo[];
   /** SDK session ID captured from status/result events, for session resume */
   sdkSessionId: string | null;
+  /** True when the stream was cancelled by user /stop, not a real error */
+  isAbort?: boolean;
 }
 
 /**
@@ -474,10 +476,11 @@ async function consumeStream(
     return {
       responseText: '',
       tokenUsage,
-      hasError: true,
+      hasError: !isAbort,
       errorMessage: isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error'),
       permissionRequests,
       sdkSessionId: capturedSdkSessionId,
+      isAbort,
     };
   }
 }

@@ -1178,6 +1178,17 @@ async function handleMessage(
       }
     } : undefined, userRole);
 
+    // ── User-initiated abort: skip delivery & error notification ──
+    // sdkSessionId preserved (not cleared), session stays alive.
+    // /stop handler already replied "已停止當前任務。" so no extra notification needed.
+    // `return` inside try triggers the finally block for preview cleanup.
+    if (result.isAbort) {
+      if (binding.id && result.sdkSessionId) {
+        store.updateChannelBinding(binding.id, { sdkSessionId: result.sdkSessionId });
+      }
+      return;
+    }
+
     // Send response text — render via channel-appropriate format.
     // If streaming preview was active and not degraded, the preview card already
     // contains the final text — skip the redundant deliverResponse.
@@ -1323,7 +1334,7 @@ async function handleCommand(
         '/mode plan|code|ask - Change mode',
         '/status - Show current status',
         '/sessions - List recent sessions',
-        '/stop - Stop current session',
+        '/stop, /cancel - 停止當前任務',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission',
         '/help - Show this help',
       ].join('\n');
@@ -1417,6 +1428,7 @@ async function handleCommand(
       break;
     }
 
+    case '/cancel':
     case '/stop': {
       const binding = router.resolve(msg.address);
       const st = getState();
@@ -1425,7 +1437,7 @@ async function handleCommand(
         taskAbort.abort();
         st.activeTasks.delete(binding.codepilotSessionId);
         syncActiveTasksToHost();
-        response = 'Stopping current task...';
+        response = '已停止當前任務。';
       } else {
         response = 'No task is currently running.';
       }
@@ -1478,7 +1490,7 @@ async function handleCommand(
         '/mode plan|code|ask - Change mode',
         '/status - Show current status',
         '/sessions - List recent sessions',
-        '/stop - Stop current session',
+        '/stop, /cancel - 停止當前任務',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission request',
         '/help - Show this help',
       ].join('\n');
