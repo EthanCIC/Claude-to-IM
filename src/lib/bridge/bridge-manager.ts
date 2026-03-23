@@ -1263,6 +1263,30 @@ async function handleMessage(
     } else if (previewState && !previewState.degraded && !previewState.previewEverDelivered) {
       console.warn(`[bridge-manager] Streaming preview never delivered for ${msg.address.chatId}, falling back to deliverResponse`);
     }
+    // ETH-144: Diagnostic logging when response contains URLs
+    const urlPattern = /https?:\/\/\S+/;
+    const responseHasUrl = result.responseText && urlPattern.test(result.responseText);
+    if (responseHasUrl) {
+      const urls = result.responseText.match(/https?:\/\/\S+/g) || [];
+      const pendingHasUrl = previewState?.pendingText ? urlPattern.test(previewState.pendingText) : false;
+      const lastSentHasUrl = previewState?.lastSentText ? urlPattern.test(previewState.lastSentText) : false;
+      console.log(`[bridge-manager][ETH-144] URL in response for ${msg.address.chatId}:`, JSON.stringify({
+        urls,
+        previewHandledDelivery: !!previewHandledDelivery,
+        pendingHasUrl,
+        lastSentHasUrl,
+        degraded: previewState?.degraded ?? null,
+        previewEverDelivered: previewState?.previewEverDelivered ?? null,
+        pendingLen: previewState?.pendingText?.length ?? 0,
+        lastSentLen: previewState?.lastSentText?.length ?? 0,
+        textMatch: previewState ? previewState.pendingText === previewState.lastSentText : null,
+        generation: previewState?.generation ?? null,
+        responseLen: result.responseText.length,
+      }));
+      if (previewHandledDelivery && !lastSentHasUrl) {
+        console.error(`[bridge-manager][ETH-144] BUG: preview "handled" delivery but lastSentText missing URL! pendingText tail: ${JSON.stringify(previewState!.pendingText!.slice(-300))}`);
+      }
+    }
     // Filter out Claude Code internal "no-op" responses that should never reach IM.
     // "No response requested." is a CLI convention (synthetic or LLM-generated) that
     // the CLI UI hides; the bridge must do the same.
