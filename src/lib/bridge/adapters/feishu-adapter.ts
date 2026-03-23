@@ -787,6 +787,9 @@ export class FeishuAdapter extends BaseChannelAdapter {
           });
           if (res?.data?.message_id) {
             console.log(`[feishu-adapter] Sent preview to ${chatId}, msgId: ${res.data.message_id}`);
+            // Seed throttle so the first PATCH respects MIN_PATCH_INTERVAL
+            // (prevents race where PATCH arrives before Lark finishes card init)
+            this.lastPatchAt = Date.now();
             // Cache content for quote resolution
             this.cacheBotMessageContent(res.data.message_id, text);
             // Only adopt this card for future updates if endPreview hasn't been
@@ -796,15 +799,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
             if (genAfter === genBefore) {
               this.previewMessages.set(chatId, res.data.message_id);
             }
-            // Always apply queued update so the card shows final content,
-            // even if endPreview was called (the card still needs its complete text).
-            const queued = this.previewQueuedUpdate.get(chatId);
-            if (queued) {
-              this.previewQueuedUpdate.delete(chatId);
-              try {
-                await this.patchPreviewCard(res.data.message_id, queued);
-              } catch { /* best effort — card at least has the initial content */ }
-            }
+            // Don't immediately PATCH queued content — let the next natural
+            // flushPreview cycle deliver it through the throttled pipeline.
+            // Immediate PATCH after CREATE can race with Lark's internal card
+            // init, causing invisible cards (ETH-158).
             return 'sent';
           }
           return 'skip';
@@ -843,7 +841,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     this.previewCreating.delete(chatId);
     // Increment generation so in-flight creates don't re-adopt stale card IDs
     this.previewGeneration.set(chatId, (this.previewGeneration.get(chatId) || 0) + 1);
-    // Don't clear previewQueuedUpdate — in-flight create needs it to PATCH final content
+    this.previewQueuedUpdate.delete(chatId);
 
     // Deliver any overflow content that was truncated from the preview card
     // due to the Lark card table limit.
