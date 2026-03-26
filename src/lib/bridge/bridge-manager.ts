@@ -127,15 +127,36 @@ async function sendAuthCard(
       }
     }
 
-    // Brief notice in the group
+    // Notice in the group with DM jump button
+    const botOpenId = (adapter as any).botOpenId || '';
+    const deepLink = botOpenId
+      ? `https://applink.larksuite.com/client/chat/open?openId=${botOpenId}`
+      : '';
+
+    const groupCardJson = JSON.stringify({
+      config: { wide_screen_mode: true },
+      header: {
+        template: 'blue',
+        title: { tag: 'plain_text', content: 'Authorization Required' },
+      },
+      elements: [
+        { tag: 'markdown', content: 'You need to authorize your Claude account first. Check your DM for instructions.' },
+        ...(deepLink ? [{
+          tag: 'action',
+          actions: [{
+            tag: 'button',
+            text: { tag: 'plain_text', content: 'Open DM' },
+            type: 'primary',
+            multi_url: { url: deepLink, pc_url: deepLink, android_url: deepLink, ios_url: deepLink },
+          }],
+        }] : []),
+      ],
+    });
+
     try {
       await restClient.im.message.create({
         params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: address.chatId,
-          msg_type: 'text',
-          content: JSON.stringify({ text: 'You need to authorize first. Check your DM for instructions.' }),
-        },
+        data: { receive_id: address.chatId, msg_type: 'interactive', content: groupCardJson },
       });
     } catch (err) {
       console.warn('[bridge-manager] Failed to send group auth notice:', err instanceof Error ? err.message : err);
