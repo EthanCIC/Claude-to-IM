@@ -67,7 +67,7 @@ export class OAuthManager {
    * (used to correlate the callback).
    */
   generateAuthUrl(openId: string, _redirectUri?: string): { url: string; state: string } {
-    const state = base64url(crypto.randomBytes(16));
+    const state = base64url(crypto.randomBytes(32));
     const codeVerifier = generateCodeVerifier();
     const codeChallenge = generateCodeChallenge(codeVerifier);
 
@@ -79,15 +79,16 @@ export class OAuthManager {
 
     // Use Anthropic's own callback URL — third-party redirect_uri
     // is not whitelisted for this client_id.
+    // Match CLI parameter order exactly
     const params = new URLSearchParams({
       code: 'true',
-      response_type: 'code',
       client_id: CLIENT_ID,
+      response_type: 'code',
       redirect_uri: ANTHROPIC_CALLBACK_URL,
       scope: SCOPES,
-      state,
       code_challenge: codeChallenge,
       code_challenge_method: 'S256',
+      state,
     });
 
     return {
