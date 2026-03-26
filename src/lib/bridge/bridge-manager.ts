@@ -89,43 +89,56 @@ async function sendAuthCard(
       console.warn('[bridge-manager] Failed to send auth card:', err instanceof Error ? err.message : err);
     }
   } else {
-    // Group chat: direct user to DM the bot
-    const botOpenId = (adapter as any).botOpenId || '';
-    const deepLink = botOpenId
-      ? `https://applink.larksuite.com/client/chat/open?openId=${botOpenId}`
-      : '';
-
-    const elements: any[] = [
-      { tag: 'markdown', content: 'You need to authorize your Claude account first. Please send me a direct message to get started.' },
-    ];
-    if (deepLink) {
-      elements.push({
-        tag: 'action',
-        actions: [{
-          tag: 'button',
-          text: { tag: 'plain_text', content: 'Open DM' },
-          type: 'primary',
-          multi_url: { url: deepLink, pc_url: deepLink, android_url: deepLink, ios_url: deepLink },
-        }],
+    // Group chat: send brief notice in group + full auth card via DM
+    if (address.userId) {
+      // Generate auth URL and send full card to user's DM
+      const { url: authUrl } = oauthManager.generateAuthUrl(address.userId);
+      const dmCardJson = JSON.stringify({
+        config: { wide_screen_mode: true },
+        header: {
+          template: 'blue',
+          title: { tag: 'plain_text', content: 'Authorize Claude Account' },
+        },
+        elements: [
+          { tag: 'markdown', content: '**Step 1:** Authorize your Claude account' },
+          {
+            tag: 'action',
+            actions: [{
+              tag: 'button',
+              text: { tag: 'plain_text', content: 'Authorize' },
+              type: 'primary',
+              multi_url: { url: authUrl, pc_url: authUrl, android_url: authUrl, ios_url: authUrl },
+            }],
+          },
+          { tag: 'markdown', content: "Browser didn't open? Copy this URL:\n" + authUrl },
+          { tag: 'hr' },
+          { tag: 'markdown', content: '**Step 2:** After authorizing, copy the code from the page and paste it here.' },
+        ],
       });
+
+      try {
+        // Send auth card directly to user's DM via open_id
+        await restClient.im.message.create({
+          params: { receive_id_type: 'open_id' },
+          data: { receive_id: address.userId, msg_type: 'interactive', content: dmCardJson },
+        });
+      } catch (err) {
+        console.warn('[bridge-manager] Failed to send auth card DM:', err instanceof Error ? err.message : err);
+      }
     }
 
-    const cardJson = JSON.stringify({
-      config: { wide_screen_mode: true },
-      header: {
-        template: 'blue',
-        title: { tag: 'plain_text', content: 'Authorization Required' },
-      },
-      elements,
-    });
-
+    // Brief notice in the group
     try {
       await restClient.im.message.create({
         params: { receive_id_type: 'chat_id' },
-        data: { receive_id: address.chatId, msg_type: 'interactive', content: cardJson },
+        data: {
+          receive_id: address.chatId,
+          msg_type: 'text',
+          content: JSON.stringify({ text: 'You need to authorize first. Check your DM for instructions.' }),
+        },
       });
     } catch (err) {
-      console.warn('[bridge-manager] Failed to send auth card:', err instanceof Error ? err.message : err);
+      console.warn('[bridge-manager] Failed to send group auth notice:', err instanceof Error ? err.message : err);
     }
   }
 }
