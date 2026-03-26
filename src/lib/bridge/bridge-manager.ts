@@ -39,7 +39,7 @@ import type { BridgeStore } from './host.js';
 /**
  * Send an OAuth authorization card to the user.
  * Group chat: button opens bot DM (OAuth flow happens there).
- * DM: button links directly to the OAuth authorize URL.
+ * DM: shows OAuth URL + instructions to paste the code back.
  */
 async function sendAuthCard(
   adapter: BaseChannelAdapter,
@@ -50,24 +50,12 @@ async function sendAuthCard(
   const meta = store.getGroupMetadata?.(address.chatId);
   const isDM = meta?.chatType === 'p2p' || !address.isGroup;
 
-  // Access the Lark REST client (adapter-specific)
   const restClient = (adapter as any).restClient;
   if (!restClient) return;
 
   if (isDM && address.userId) {
-    // DM: generate OAuth URL directly
-    const webhookUrl = store.getSetting('bridge_webhook_url') || process.env.CTI_WEBHOOK_URL || '';
-    if (!webhookUrl) {
-      await deliver(adapter, {
-        address,
-        text: 'OAuth not configured. Ask the admin to set CTI_WEBHOOK_URL.',
-        parseMode: 'plain',
-      });
-      return;
-    }
-
-    const redirectUri = `${webhookUrl}/oauth/callback`;
-    const { url } = oauthManager.generateAuthUrl(address.userId, redirectUri);
+    // DM: generate OAuth URL, user authorizes in browser, pastes code back here
+    const { url } = oauthManager.generateAuthUrl(address.userId);
 
     const cardJson = JSON.stringify({
       config: { wide_screen_mode: true },
@@ -76,8 +64,7 @@ async function sendAuthCard(
         title: { tag: 'plain_text', content: 'Authorize Claude Account' },
       },
       elements: [
-        { tag: 'markdown', content: 'Click below to authorize your Claude account. After authorization, you can start using this bot.' },
-        { tag: 'hr' },
+        { tag: 'markdown', content: '**Step 1:** Click the button below to authorize your Claude account.' },
         {
           tag: 'action',
           actions: [{
@@ -87,6 +74,8 @@ async function sendAuthCard(
             multi_url: { url, pc_url: url, android_url: url, ios_url: url },
           }],
         },
+        { tag: 'hr' },
+        { tag: 'markdown', content: '**Step 2:** After authorizing, you will see a code on the page. Copy it and paste it here.' },
       ],
     });
 
@@ -106,7 +95,7 @@ async function sendAuthCard(
       : '';
 
     const elements: any[] = [
-      { tag: 'markdown', content: 'You need to authorize your Claude account before using this bot. Please send me a direct message to complete authorization.' },
+      { tag: 'markdown', content: 'You need to authorize your Claude account first. Please send me a direct message to get started.' },
     ];
     if (deepLink) {
       elements.push({
@@ -137,6 +126,64 @@ async function sendAuthCard(
     } catch (err) {
       console.warn('[bridge-manager] Failed to send auth card:', err instanceof Error ? err.message : err);
     }
+  }
+}
+
+/**
+ * Try to handle a DM message as a pasted OAuth auth code.
+ * Returns true if the message was an auth code and was processed.
+ */
+async function tryHandleAuthCode(
+  adapter: BaseChannelAdapter,
+  msg: InboundMessage,
+): Promise<boolean> {
+  const { oauth: oauthMgr, store } = getBridgeContext();
+  if (!oauthMgr) return false;
+
+  const meta = store.getGroupMetadata?.(msg.address.chatId);
+  const isDM = meta?.chatType === 'p2p' || !msg.address.isGroup;
+  if (!isDM) return false;
+
+  const text = msg.text?.trim();
+  if (!text) return false;
+
+  // Try parsing as {code}#{state}
+  const parsed = oauthMgr.parseAuthCode(text);
+  if (!parsed) return false;
+
+  const restClient = (adapter as any).restClient;
+
+  try {
+    const { token, openId } = await oauthMgr.exchangeCode(parsed.state, parsed.code);
+    store.setAuthToken?.(openId, token);
+
+    // Notify success
+    if (restClient) {
+      await restClient.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: msg.address.chatId,
+          msg_type: 'text',
+          content: JSON.stringify({ text: 'Authorization successful. You can now use the bot.' }),
+        },
+      });
+    }
+
+    console.log(`[bridge-manager] OAuth code exchange success for ${openId.slice(0, 12)}...`);
+    return true;
+  } catch (err) {
+    console.error('[bridge-manager] OAuth code exchange failed:', err instanceof Error ? err.message : err);
+    if (restClient) {
+      await restClient.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: msg.address.chatId,
+          msg_type: 'text',
+          content: JSON.stringify({ text: `Authorization failed: ${err instanceof Error ? err.message : 'Unknown error'}. Please try again.` }),
+        },
+      });
+    }
+    return true; // Still consumed the message
   }
 }
 
@@ -981,6 +1028,12 @@ async function handleMessage(
       adapter.acknowledgeUpdate(msg.updateId);
     }
   };
+
+  // Try handling as a pasted OAuth auth code (DM only, before any other processing)
+  if (!msg.callbackData && await tryHandleAuthCode(adapter, msg)) {
+    ack();
+    return;
+  }
 
   // Handle callback queries (permission buttons or question answers)
   if (msg.callbackData) {

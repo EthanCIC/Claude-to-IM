@@ -12,9 +12,10 @@ import type { OAuthToken } from '../types.js';
 // ── Constants ──
 
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const AUTHORIZE_URL = 'https://platform.claude.com/oauth/authorize';
+const AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize';
+const ANTHROPIC_CALLBACK_URL = 'https://platform.claude.com/oauth/code/callback';
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
-const SCOPES = 'user:inference user:profile';
+const SCOPES = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload';
 const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 // ── PKCE helpers ──
@@ -65,7 +66,7 @@ export class OAuthManager {
    * Returns the URL to redirect the user to and the state token
    * (used to correlate the callback).
    */
-  generateAuthUrl(openId: string, redirectUri: string): { url: string; state: string } {
+  generateAuthUrl(openId: string, _redirectUri?: string): { url: string; state: string } {
     const state = base64url(crypto.randomBytes(16));
     const codeVerifier = generateCodeVerifier();
     const codeChallenge = generateCodeChallenge(codeVerifier);
@@ -76,10 +77,13 @@ export class OAuthManager {
       createdAt: Date.now(),
     });
 
+    // Use Anthropic's own callback URL — third-party redirect_uri
+    // is not whitelisted for this client_id.
     const params = new URLSearchParams({
+      code: 'true',
       response_type: 'code',
       client_id: CLIENT_ID,
-      redirect_uri: redirectUri,
+      redirect_uri: ANTHROPIC_CALLBACK_URL,
       scope: SCOPES,
       state,
       code_challenge: codeChallenge,
@@ -97,10 +101,26 @@ export class OAuthManager {
    * Validates the state parameter against pending flows.
    * Returns the stored token on success, throws on failure.
    */
+  /**
+   * Parse a pasted auth code string from the Anthropic callback page.
+   * Format: `{authorization_code}#{state}`
+   * Returns null if the format doesn't match.
+   */
+  parseAuthCode(input: string): { code: string; state: string } | null {
+    const trimmed = input.trim();
+    const hashIdx = trimmed.indexOf('#');
+    if (hashIdx <= 0 || hashIdx >= trimmed.length - 1) return null;
+    const code = trimmed.slice(0, hashIdx);
+    const state = trimmed.slice(hashIdx + 1);
+    // Validate: state must match a pending flow
+    if (!this.pendingFlows.has(state)) return null;
+    return { code, state };
+  }
+
   async exchangeCode(
     state: string,
     code: string,
-    redirectUri: string,
+    redirectUri?: string,
   ): Promise<{ token: OAuthToken; openId: string }> {
     const flow = this.pendingFlows.get(state);
     if (!flow) {
@@ -120,7 +140,7 @@ export class OAuthManager {
       grant_type: 'authorization_code',
       client_id: CLIENT_ID,
       code,
-      redirect_uri: redirectUri,
+      redirect_uri: redirectUri || ANTHROPIC_CALLBACK_URL,
       code_verifier: flow.codeVerifier,
     });
 
