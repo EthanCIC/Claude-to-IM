@@ -246,6 +246,8 @@ export interface StreamChatParams {
   onRuntimeStatusChange?: (status: string) => void;
   /** User permission role. undefined = no role enforcement (legacy). */
   userRole?: import('./types.js').UserRole;
+  /** Per-user OAuth access token (injected into subprocess env as CLAUDE_CODE_OAUTH_TOKEN). */
+  oauthToken?: string;
 }
 
 export interface LLMProvider {
