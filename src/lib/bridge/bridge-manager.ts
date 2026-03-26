@@ -1407,6 +1407,13 @@ async function handleMessage(
 
       if (!storedToken) {
         // No valid token — send auth card and skip processing
+        // Clean up preview state before early return (initialized above)
+        if (previewState) {
+          if (previewState.throttleTimer) clearTimeout(previewState.throttleTimer);
+          previewState = null;
+        }
+        state.activeTasks.delete(binding.codepilotSessionId);
+        syncActiveTasksToHost();
         await sendAuthCard(adapter, msg.address, oauthMgr, store);
         return;
       }
@@ -1501,6 +1508,15 @@ async function handleMessage(
       console.warn(`[bridge-manager] Streaming preview final text not confirmed for ${msg.address.chatId}, falling back to deliverResponse`);
     } else if (previewState && !previewState.degraded && !previewState.previewEverDelivered) {
       console.warn(`[bridge-manager] Streaming preview never delivered for ${msg.address.chatId}, falling back to deliverResponse`);
+      console.warn(`[bridge-manager] DM delivery diagnostic:`, JSON.stringify({
+        chatId: msg.address.chatId,
+        responseLen: result.responseText?.length ?? 0,
+        hasError: result.hasError,
+        errorMessage: result.errorMessage || null,
+        isAbort: result.isAbort,
+        sdkSessionId: result.sdkSessionId?.slice(0, 8) ?? null,
+        pendingText: previewState.pendingText?.slice(0, 100) || '',
+      }));
     }
     // ETH-144: Diagnostic logging when response contains URLs
     const urlPattern = /https?:\/\/\S+/;
