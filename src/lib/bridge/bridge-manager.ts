@@ -1306,16 +1306,16 @@ async function handleMessage(
       });
       const errorResponse: OutboundMessage = {
         address: msg.address,
-        text: `<b>Error:</b> ${escapeHtml(errorText)}\n\nSession 已重置，下次訊息將開啟新對話。`,
+        text: `<b>Error:</b> ${escapeHtml(errorText)}\n\n下次訊息將嘗試繼續當前對話。如需重置，請發送 /session reset`,
         parseMode: 'HTML',
         replyToMessageId: msg.messageId,
       };
       await deliver(adapter, errorResponse);
     }
 
-    // Persist the actual SDK session ID for future resume.
-    // If the result has an error and no session ID was captured, clear the
-    // stale ID so the next message starts fresh instead of retrying a broken resume.
+    // Persist the actual SDK session ID for future resume (ETH-185).
+    // Errors no longer clear the session — the JSONL transcript survives and
+    // the next query() can resume. Users can /session reset if needed.
     if (binding.id) {
       try {
         const update = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
@@ -1648,20 +1648,21 @@ async function handleCommand(
  * Compute the sdkSessionId value to persist after a conversation result.
  * Returns the new value to write, or null if no update is needed.
  *
- * Rules:
- * - If result has sdkSessionId AND no error → save the new ID
- * - If result has error (regardless of sdkSessionId) → clear to empty string
+ * Rules (ETH-185):
+ * - If result has sdkSessionId → save the new ID (regardless of error)
+ * - If result has error but NO sdkSessionId → no update (preserve previous ID)
  * - Otherwise → no update needed
+ *
+ * Errors (quota exceeded, rate limit, transient failures) should NOT clear
+ * the session. The JSONL transcript is intact and the next query() can resume.
+ * Users can manually reset via /session reset if the session is truly broken.
  */
 export function computeSdkSessionUpdate(
   sdkSessionId: string | null | undefined,
   hasError: boolean,
 ): string | null {
-  if (sdkSessionId && !hasError) {
+  if (sdkSessionId) {
     return sdkSessionId;
-  }
-  if (hasError) {
-    return '';
   }
   return null;
 }
