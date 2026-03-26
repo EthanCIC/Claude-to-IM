@@ -356,9 +356,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const description = resp?.data?.description || '';
       const chatType = resp?.data?.chat_type || '';
 
-      // p2p chats have no group name — resolve from the other member's display name
-      if (!name && chatType === 'p2p') {
-        name = await this.resolveP2pChatName(chatId) || '';
+      // Resolve empty names: p2p → other member's name; group → member names summary
+      if (!name) {
+        if (chatType === 'p2p') {
+          name = await this.resolveP2pChatName(chatId) || '';
+        } else {
+          name = await this.resolveGroupNameFromMembers(chatId) || '';
+        }
       }
 
       this.metadataCachedChats.add(chatId);
@@ -393,6 +397,25 @@ export class FeishuAdapter extends BaseChannelAdapter {
       for (const [userId, name] of cached) {
         if (!this.botIds.has(userId) && name) return `${name} DM`;
       }
+    } catch { /* best effort */ }
+    return null;
+  }
+
+  /**
+   * Resolve unnamed group chat by building a name from member names.
+   * Returns something like "Holly, Sean +3" or null.
+   */
+  private async resolveGroupNameFromMembers(chatId: string): Promise<string | null> {
+    if (!this.restClient) return null;
+    try {
+      if (!this.membersCachedChats.has(chatId)) {
+        await this.loadChatMembers(chatId);
+      }
+      const members = getBridgeContext().store.getGroupMembers?.(chatId);
+      if (!members || members.length === 0) return null;
+      const names = members.slice(0, 2).map(m => m.name);
+      const rest = members.length - names.length;
+      return rest > 0 ? `${names.join(', ')} +${rest}` : names.join(', ');
     } catch { /* best effort */ }
     return null;
   }
