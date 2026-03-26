@@ -358,10 +358,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
       // Resolve empty names: p2p → other member's name; group → member names summary
       if (!name) {
-        if (chatType === 'p2p') {
-          name = await this.resolveP2pChatName(chatId) || '';
-        } else {
-          name = await this.resolveGroupNameFromMembers(chatId) || '';
+        const resolved = chatType === 'p2p'
+          ? await this.resolveP2pChatName(chatId)
+          : await this.resolveGroupNameFromMembers(chatId);
+        if (resolved) {
+          name = resolved;
+          console.log(`[feishu-adapter] Resolved empty chat name for ${chatId}: "${name}"`);
         }
       }
 
