@@ -487,10 +487,44 @@ export class FeishuAdapter extends BaseChannelAdapter {
         }
       }
 
+      // Repair any existing group context files with empty names
+      // (covers chats not in im.chat.list, e.g. DMs with incomplete API metadata)
+      await this.repairEmptyGroupNames();
+
       console.log(`[feishu-adapter] Preloaded members from ${chatIds.length} chats (${this.userNameCache.size} users cached)`);
     } catch (err) {
       console.warn('[feishu-adapter] Failed to preload chat members:', err instanceof Error ? err.message : err);
     }
+  }
+
+  /**
+   * Scan group context files for empty names and try to resolve them.
+   */
+  private async repairEmptyGroupNames(): Promise<void> {
+    const { store } = getBridgeContext();
+    try {
+      const fs = await import('fs');
+      const path = await import('path');
+      const groupsDir = path.join(process.env.HOME || '/tmp', '.claude-to-im', 'config', 'groups');
+      if (!fs.existsSync(groupsDir)) return;
+      for (const file of fs.readdirSync(groupsDir)) {
+        if (!file.endsWith('.md')) continue;
+        const chatId = file.replace('.md', '');
+        const content = fs.readFileSync(path.join(groupsDir, file), 'utf-8');
+        const firstLine = content.split('\n')[0];
+        if (firstLine && /^#\s+\S/.test(firstLine)) continue; // has a valid name
+        // Empty name — try to resolve
+        if (!this.membersCachedChats.has(chatId)) {
+          await this.loadChatMembers(chatId).catch(() => {});
+        }
+        const resolved = await this.resolveP2pChatName(chatId)
+          || await this.resolveGroupNameFromMembers(chatId);
+        if (resolved) {
+          store.setGroupMetadata?.(chatId, { name: resolved, description: '', chatType: '' });
+          console.log(`[feishu-adapter] Repaired empty name on startup: ${chatId} → "${resolved}"`);
+        }
+      }
+    } catch { /* best effort */ }
   }
 
   /**
