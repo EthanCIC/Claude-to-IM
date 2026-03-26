@@ -7,7 +7,7 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, UserRole, FileAttachment } from './types.js';
+import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, UserRole, FileAttachment, ChannelAddress } from './types.js';
 import type { InterruptedTask, ActiveTaskInfo } from './host.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
@@ -30,6 +30,115 @@ import {
 } from './security/validators.js';
 
 const GLOBAL_KEY = '__bridge_manager__';
+
+// ── Per-user OAuth auth card ─────────────────────────────────
+
+import type { OAuthManager } from './auth/oauth-manager.js';
+import type { BridgeStore } from './host.js';
+
+/**
+ * Send an OAuth authorization card to the user.
+ * Group chat: button opens bot DM (OAuth flow happens there).
+ * DM: button links directly to the OAuth authorize URL.
+ */
+async function sendAuthCard(
+  adapter: BaseChannelAdapter,
+  address: ChannelAddress,
+  oauthManager: OAuthManager,
+  store: BridgeStore,
+): Promise<void> {
+  const meta = store.getGroupMetadata?.(address.chatId);
+  const isDM = meta?.chatType === 'p2p' || !address.isGroup;
+
+  // Access the Lark REST client (adapter-specific)
+  const restClient = (adapter as any).restClient;
+  if (!restClient) return;
+
+  if (isDM && address.userId) {
+    // DM: generate OAuth URL directly
+    const webhookUrl = store.getSetting('bridge_webhook_url') || process.env.CTI_WEBHOOK_URL || '';
+    if (!webhookUrl) {
+      await deliver(adapter, {
+        address,
+        text: 'OAuth not configured. Ask the admin to set CTI_WEBHOOK_URL.',
+        parseMode: 'plain',
+      });
+      return;
+    }
+
+    const redirectUri = `${webhookUrl}/oauth/callback`;
+    const { url } = oauthManager.generateAuthUrl(address.userId, redirectUri);
+
+    const cardJson = JSON.stringify({
+      config: { wide_screen_mode: true },
+      header: {
+        template: 'blue',
+        title: { tag: 'plain_text', content: 'Authorize Claude Account' },
+      },
+      elements: [
+        { tag: 'markdown', content: 'Click below to authorize your Claude account. After authorization, you can start using this bot.' },
+        { tag: 'hr' },
+        {
+          tag: 'action',
+          actions: [{
+            tag: 'button',
+            text: { tag: 'plain_text', content: 'Authorize' },
+            type: 'primary',
+            multi_url: { url, pc_url: url, android_url: url, ios_url: url },
+          }],
+        },
+      ],
+    });
+
+    try {
+      await restClient.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: { receive_id: address.chatId, msg_type: 'interactive', content: cardJson },
+      });
+    } catch (err) {
+      console.warn('[bridge-manager] Failed to send auth card:', err instanceof Error ? err.message : err);
+    }
+  } else {
+    // Group chat: direct user to DM the bot
+    const botOpenId = (adapter as any).botOpenId || '';
+    const deepLink = botOpenId
+      ? `https://applink.larksuite.com/client/chat/open?openId=${botOpenId}`
+      : '';
+
+    const elements: any[] = [
+      { tag: 'markdown', content: 'You need to authorize your Claude account before using this bot. Please send me a direct message to complete authorization.' },
+    ];
+    if (deepLink) {
+      elements.push({
+        tag: 'action',
+        actions: [{
+          tag: 'button',
+          text: { tag: 'plain_text', content: 'Open DM' },
+          type: 'primary',
+          multi_url: { url: deepLink, pc_url: deepLink, android_url: deepLink, ios_url: deepLink },
+        }],
+      });
+    }
+
+    const cardJson = JSON.stringify({
+      config: { wide_screen_mode: true },
+      header: {
+        template: 'blue',
+        title: { tag: 'plain_text', content: 'Authorization Required' },
+      },
+      elements,
+    });
+
+    try {
+      await restClient.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: { receive_id: address.chatId, msg_type: 'interactive', content: cardJson },
+      });
+    } catch (err) {
+      console.warn('[bridge-manager] Failed to send auth card:', err instanceof Error ? err.message : err);
+    }
+  }
+}
 
 // ── Message envelope helpers ─────────────────────────────────
 
@@ -328,7 +437,7 @@ function finalizePreviewSegment(
 
 // ── Channel-aware rendering dispatch ──────────────────────────
 
-import type { ChannelAddress, SendResult } from './types.js';
+import type { SendResult } from './types.js';
 
 /**
  * Render response text and deliver via the appropriate channel format.
@@ -1186,6 +1295,48 @@ async function handleMessage(
 
     const userRole = resolveUserRole(adapter.channelType, msg.address.userId);
 
+    // ── Per-user OAuth check ──
+    const senderOpenId = msg.address.userId;
+    let resolvedOAuthToken: string | undefined;
+    const { oauth: oauthMgr } = getBridgeContext();
+
+    if (oauthMgr && senderOpenId) {
+      let storedToken = store.getAuthToken?.(senderOpenId) ?? null;
+
+      if (storedToken && !oauthMgr.isTokenValid(storedToken)) {
+        // Token expired — try refresh
+        if (storedToken.refresh_token) {
+          try {
+            storedToken = await oauthMgr.refreshToken(storedToken);
+            store.setAuthToken?.(senderOpenId, storedToken);
+          } catch {
+            storedToken = null;
+          }
+        } else {
+          storedToken = null;
+        }
+      }
+
+      if (!storedToken) {
+        // No valid token — send auth card and skip processing
+        await sendAuthCard(adapter, msg.address, oauthMgr, store);
+        return;
+      }
+
+      // Proactive refresh if close to expiry (< 5 min)
+      if (oauthMgr.needsRefresh(storedToken, 300) && storedToken.refresh_token) {
+        try {
+          const refreshed = await oauthMgr.refreshToken(storedToken);
+          store.setAuthToken?.(senderOpenId, refreshed);
+          resolvedOAuthToken = refreshed.access_token;
+        } catch {
+          resolvedOAuthToken = storedToken.access_token;
+        }
+      } else {
+        resolvedOAuthToken = storedToken.access_token;
+      }
+    }
+
     const result = await engine.processMessage(binding, promptText, async (perm) => {
       // ── Finalize current preview segment before permission card ──
       if (previewState && streamCfg) {
@@ -1210,7 +1361,7 @@ async function handleMessage(
       if (previewState.lastSentAt > 0 || previewState.pendingText.length > 0) {
         finalizePreviewSegment(adapter, previewState, streamCfg!, msg.address.chatId);
       }
-    } : undefined, userRole);
+    } : undefined, userRole, resolvedOAuthToken);
 
     // ── User-initiated abort: skip delivery & error notification ──
     // sdkSessionId preserved (not cleared), session stays alive.
