@@ -226,6 +226,8 @@ export interface BridgeStore {
   setAuthToken?(openId: string, token: import('./types.js').OAuthToken): void;
   /** Remove a user's OAuth token (revoke/logout). */
   removeAuthToken?(openId: string): void;
+  /** Return per-user CLAUDE_CONFIG_DIR path (with .credentials.json written). */
+  getConfigDir?(openId: string): string | null;
 }
 
 // ── Host Interface: LLM Provider ─────────────────────────────
@@ -246,8 +248,8 @@ export interface StreamChatParams {
   onRuntimeStatusChange?: (status: string) => void;
   /** User permission role. undefined = no role enforcement (legacy). */
   userRole?: import('./types.js').UserRole;
-  /** Per-user OAuth access token (injected into subprocess env as CLAUDE_CODE_OAUTH_TOKEN). */
-  oauthToken?: string;
+  /** Per-user config directory path (injected as CLAUDE_CONFIG_DIR for auth + MCP). */
+  userConfigDir?: string;
 }
 
 export interface LLMProvider {

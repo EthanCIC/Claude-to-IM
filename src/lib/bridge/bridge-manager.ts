@@ -1385,7 +1385,7 @@ async function handleMessage(
 
     // ── Per-user OAuth check ──
     const senderOpenId = msg.address.userId;
-    let resolvedOAuthToken: string | undefined;
+    let resolvedConfigDir: string | undefined;
     const { oauth: oauthMgr } = getBridgeContext();
 
     if (oauthMgr && senderOpenId) {
@@ -1423,13 +1423,11 @@ async function handleMessage(
         try {
           const refreshed = await oauthMgr.refreshToken(storedToken);
           store.setAuthToken?.(senderOpenId, refreshed);
-          resolvedOAuthToken = refreshed.access_token;
-        } catch {
-          resolvedOAuthToken = storedToken.access_token;
-        }
-      } else {
-        resolvedOAuthToken = storedToken.access_token;
+        } catch { /* still valid, continue */ }
       }
+
+      // Resolve per-user config dir (writes .credentials.json with full scopes)
+      resolvedConfigDir = store.getConfigDir?.(senderOpenId) ?? undefined;
     }
 
     const result = await engine.processMessage(binding, promptText, async (perm) => {
@@ -1456,7 +1454,7 @@ async function handleMessage(
       if (previewState.lastSentAt > 0 || previewState.pendingText.length > 0) {
         finalizePreviewSegment(adapter, previewState, streamCfg!, msg.address.chatId);
       }
-    } : undefined, userRole, resolvedOAuthToken);
+    } : undefined, userRole, resolvedConfigDir);
 
     // ── User-initiated abort: skip delivery & error notification ──
     // sdkSessionId preserved (not cleared), session stays alive.

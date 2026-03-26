@@ -73,7 +73,7 @@ export async function processMessage(
   onPartialText?: OnPartialText,
   onToolUse?: OnToolUse,
   userRole?: UserRole,
-  oauthToken?: string,
+  userConfigDir?: string,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -238,7 +238,7 @@ export async function processMessage(
         try { store.setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },
       userRole,
-      oauthToken,
+      userConfigDir,
     });
 
     // Consume the stream server-side (replicate collectStreamResponse pattern).
