@@ -14,12 +14,15 @@ import type {
   PermissionGateway,
   LifecycleHooks,
 } from './host.js';
+import type { OAuthManager } from './auth/oauth-manager.js';
 
 export interface BridgeContext {
   store: BridgeStore;
   llm: LLMProvider;
   permissions: PermissionGateway;
   lifecycle: LifecycleHooks;
+  /** Per-user OAuth manager. Optional — when absent, auth is not enforced. */
+  oauth?: OAuthManager;
 }
 
 const CONTEXT_KEY = '__bridge_context__';

@@ -81,6 +81,13 @@ export class LarkAdapter extends FeishuAdapter {
     const port = Number(this.setting('webhook_port')) || 9800;
 
     this.httpServer = http.createServer(async (req, res) => {
+      // ── OAuth callback (browser GET redirect from Anthropic) ──
+      const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+      if (reqUrl.pathname === '/oauth/callback') {
+        await this.handleOAuthCallback(req, res, reqUrl);
+        return;
+      }
+
       // Buffer the request body for inspection
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -439,6 +446,79 @@ export class LarkAdapter extends FeishuAdapter {
       console.log(`[lark-adapter] Permission card expired: ${messageId}`);
     } catch (err) {
       console.warn('[lark-adapter] Failed to expire permission card:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  // ── OAuth callback handler ──────────────────────────────────
+
+  /**
+   * Handle the /oauth/callback GET request from Anthropic's OAuth redirect.
+   * Exchanges the authorization code for tokens, stores them, and notifies the user.
+   */
+  private async handleOAuthCallback(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+
+    if (!code || !state) {
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<html><body><h2>Missing code or state parameter</h2></body></html>');
+      return;
+    }
+
+    try {
+      const { oauth, store } = getBridgeContext();
+      if (!oauth) throw new Error('OAuth not configured');
+
+      // Reconstruct the redirect URI from the incoming request
+      const proto = (req.headers['x-forwarded-proto'] as string) || 'http';
+      const host = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost';
+      const redirectUri = `${proto}://${host}/oauth/callback`;
+
+      const { token, openId } = await oauth.exchangeCode(state, code, redirectUri);
+      store.setAuthToken?.(openId, token);
+
+      // Notify user via Lark DM
+      if (this.restClient) {
+        try {
+          await this.restClient.im.message.create({
+            params: { receive_id_type: 'open_id' },
+            data: {
+              receive_id: openId,
+              msg_type: 'text',
+              content: JSON.stringify({ text: 'Authorization successful. You can now use the bot.' }),
+            },
+          });
+        } catch (dmErr) {
+          console.warn('[lark-adapter] Failed to send auth success DM:', dmErr instanceof Error ? dmErr.message : dmErr);
+        }
+      }
+
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end([
+        '<!DOCTYPE html><html><head><meta charset="utf-8">',
+        '<title>Authorization Successful</title></head>',
+        '<body style="font-family:system-ui;text-align:center;padding:60px">',
+        '<h2>Authorization successful</h2>',
+        '<p>You can close this tab and return to Lark.</p>',
+        '</body></html>',
+      ].join(''));
+      console.log(`[lark-adapter] OAuth callback success for ${openId.slice(0, 12)}...`);
+    } catch (err) {
+      console.error('[lark-adapter] OAuth callback error:', err instanceof Error ? err.message : err);
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end([
+        '<!DOCTYPE html><html><head><meta charset="utf-8">',
+        '<title>Authorization Failed</title></head>',
+        '<body style="font-family:system-ui;text-align:center;padding:60px">',
+        `<h2>Authorization failed</h2>`,
+        `<p>${msg}. Please try again.</p>`,
+        '</body></html>',
+      ].join(''));
     }
   }
 
