@@ -218,6 +218,14 @@ export interface BridgeStore {
   // ── Channel offsets (adapter watermarks) ──
   getChannelOffset(key: string): string;
   setChannelOffset(key: string, offset: string): void;
+
+  // ── Auth tokens (per-user OAuth) ──
+  /** Retrieve stored OAuth token for a user, or null if not authorized. */
+  getAuthToken?(openId: string): import('./types.js').OAuthToken | null;
+  /** Store an OAuth token for a user. */
+  setAuthToken?(openId: string, token: import('./types.js').OAuthToken): void;
+  /** Remove a user's OAuth token (revoke/logout). */
+  removeAuthToken?(openId: string): void;
 }
 
 // ── Host Interface: LLM Provider ─────────────────────────────
