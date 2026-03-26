@@ -1833,6 +1833,17 @@ async function handleCommand(
       ].join('\n');
       break;
 
+    case '/logout': {
+      const senderOpenId = msg.address.userId;
+      if (senderOpenId && store.getAuthToken?.(senderOpenId)) {
+        store.removeAuthToken?.(senderOpenId);
+        response = 'Logged out. You will need to re-authorize next time.';
+      } else {
+        response = 'You are not currently authorized.';
+      }
+      break;
+    }
+
     default:
       response = `Unknown command: ${escapeHtml(command)}\nType /help for available commands.`;
   }
