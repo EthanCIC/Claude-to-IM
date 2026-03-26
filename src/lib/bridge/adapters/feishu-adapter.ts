@@ -352,9 +352,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const resp: any = await this.restClient.im.chat.get({
         path: { chat_id: chatId },
       });
-      const name = resp?.data?.name || '';
+      let name = resp?.data?.name || '';
       const description = resp?.data?.description || '';
       const chatType = resp?.data?.chat_type || '';
+
+      // p2p chats have no group name — resolve from the other member's display name
+      if (!name && chatType === 'p2p') {
+        name = await this.resolveP2pChatName(chatId) || '';
+      }
+
       this.metadataCachedChats.add(chatId);
       const { store } = getBridgeContext();
       store.setGroupMetadata?.(chatId, { name, description, chatType });
@@ -364,6 +370,31 @@ export class FeishuAdapter extends BaseChannelAdapter {
         err instanceof Error ? err.message : err,
       );
     }
+  }
+
+  /**
+   * Resolve a p2p chat name by finding the non-bot member and getting their display name.
+   */
+  private async resolveP2pChatName(chatId: string): Promise<string | null> {
+    if (!this.restClient) return null;
+    try {
+      // Load members if not cached
+      if (!this.membersCachedChats.has(chatId)) {
+        await this.loadChatMembers(chatId);
+      }
+      const members = getBridgeContext().store.getGroupMembers?.(chatId);
+      if (members && members.length > 0) {
+        // Find the non-bot member
+        const other = members.find(m => !this.botIds.has(m.id));
+        if (other?.name) return `${other.name} DM`;
+      }
+      // Fallback: try Contact API for each member
+      const cached = this.userNameCache;
+      for (const [userId, name] of cached) {
+        if (!this.botIds.has(userId) && name) return `${name} DM`;
+      }
+    } catch { /* best effort */ }
+    return null;
   }
 
   /**
@@ -407,8 +438,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
                 const name = chat.name || '';
                 const description = chat.description || '';
                 const chatType = chat.chat_type || '';
-                this.metadataCachedChats.add(chat.chat_id);
-                store.setGroupMetadata?.(chat.chat_id, { name, description, chatType });
+                // Don't mark as cached yet if name is empty (p2p) — let loadChatMetadata retry
+                if (name) {
+                  this.metadataCachedChats.add(chat.chat_id);
+                  store.setGroupMetadata?.(chat.chat_id, { name, description, chatType });
+                }
               }
             }
           }
@@ -419,6 +453,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
       for (const chatId of chatIds) {
         await this.loadChatMembers(chatId);
       }
+
+      // Resolve names for chats that had empty names (p2p chats)
+      const { store: resolveStore } = getBridgeContext();
+      for (const chatId of chatIds) {
+        if (!this.metadataCachedChats.has(chatId)) {
+          await this.loadChatMetadata(chatId);
+        }
+      }
+
       console.log(`[feishu-adapter] Preloaded members from ${chatIds.length} chats (${this.userNameCache.size} users cached)`);
     } catch (err) {
       console.warn('[feishu-adapter] Failed to preload chat members:', err instanceof Error ? err.message : err);

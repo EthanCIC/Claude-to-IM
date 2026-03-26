@@ -1559,7 +1559,7 @@ async function handleMessage(
       });
       const errorResponse: OutboundMessage = {
         address: msg.address,
-        text: `<b>Error:</b> ${escapeHtml(errorText)}\n\n下次訊息將嘗試繼續當前對話。如需重置，請發送 /session reset`,
+        text: `<b>Error:</b> ${escapeHtml(errorText)}`,
         parseMode: 'HTML',
         replyToMessageId: msg.messageId,
       };
