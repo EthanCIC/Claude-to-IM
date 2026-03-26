@@ -356,11 +356,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const description = resp?.data?.description || '';
       const chatType = resp?.data?.chat_type || '';
 
-      // Resolve empty names: p2p → other member's name; group → member names summary
+      // Resolve empty names — try p2p first, then group summary.
+      // Don't rely on chatType: API returns undefined for some DMs.
       if (!name) {
-        const resolved = chatType === 'p2p'
-          ? await this.resolveP2pChatName(chatId)
-          : await this.resolveGroupNameFromMembers(chatId);
+        const resolved = await this.resolveP2pChatName(chatId)
+          || await this.resolveGroupNameFromMembers(chatId);
         if (resolved) {
           name = resolved;
           console.log(`[feishu-adapter] Resolved empty chat name for ${chatId}: "${name}"`);
