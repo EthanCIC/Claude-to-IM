@@ -221,3 +221,16 @@ export const PLATFORM_LIMITS: Record<string, number> = {
   lark: 30000,
   qq: 2000,
 };
+
+// ── OAuth ───────────────────────────────────────────────────
+
+/** Stored OAuth token for per-user authentication. */
+export interface OAuthToken {
+  access_token: string;
+  refresh_token?: string;
+  /** Unix epoch seconds when the access token expires. */
+  expires_at: number;
+  scopes: string[];
+  /** ISO timestamp of when the user completed authorization. */
+  authorized_at: string;
+}
