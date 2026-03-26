@@ -137,18 +137,20 @@ export class OAuthManager {
     // Remove used state immediately to prevent replay
     this.pendingFlows.delete(state);
 
-    const body = new URLSearchParams({
+    // CLI uses JSON body with state parameter included
+    const body = JSON.stringify({
       grant_type: 'authorization_code',
-      client_id: CLIENT_ID,
       code,
       redirect_uri: redirectUri || ANTHROPIC_CALLBACK_URL,
+      client_id: CLIENT_ID,
       code_verifier: flow.codeVerifier,
+      state,
     });
 
     const res = await fetch(TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
+      headers: { 'Content-Type': 'application/json' },
+      body,
     });
 
     if (!res.ok) {
