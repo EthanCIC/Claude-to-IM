@@ -1395,12 +1395,16 @@ async function handleMessage(
         // Token expired — try refresh
         if (storedToken.refresh_token) {
           try {
+            console.log(`[bridge-manager] Token expired for ${senderOpenId.slice(0, 12)}, attempting refresh...`);
             storedToken = await oauthMgr.refreshToken(storedToken);
             store.setAuthToken?.(senderOpenId, storedToken);
-          } catch {
+            console.log(`[bridge-manager] Token refreshed successfully for ${senderOpenId.slice(0, 12)}`);
+          } catch (refreshErr) {
+            console.error(`[bridge-manager] Token refresh failed for ${senderOpenId.slice(0, 12)}:`, refreshErr instanceof Error ? refreshErr.message : refreshErr);
             storedToken = null;
           }
         } else {
+          console.log(`[bridge-manager] Token expired, no refresh_token for ${senderOpenId.slice(0, 12)}`);
           storedToken = null;
         }
       }

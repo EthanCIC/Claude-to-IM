@@ -185,7 +185,8 @@ export class OAuthManager {
       throw new Error('No refresh token available');
     }
 
-    const body = new URLSearchParams({
+    // CLI uses JSON body for token endpoint (same as code exchange)
+    const body = JSON.stringify({
       grant_type: 'refresh_token',
       client_id: CLIENT_ID,
       refresh_token: token.refresh_token,
@@ -193,8 +194,8 @@ export class OAuthManager {
 
     const res = await fetch(TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
+      headers: { 'Content-Type': 'application/json' },
+      body,
     });
 
     if (!res.ok) {
