@@ -64,9 +64,19 @@ async function sendAuthCard(
         title: { tag: 'plain_text', content: 'Authorize Claude Account' },
       },
       elements: [
-        { tag: 'markdown', content: '**Step 1:** Open this link in your browser to authorize:\n\n' + url },
+        { tag: 'markdown', content: '**Step 1:** Authorize your Claude account' },
+        {
+          tag: 'action',
+          actions: [{
+            tag: 'button',
+            text: { tag: 'plain_text', content: 'Authorize' },
+            type: 'primary',
+            multi_url: { url, pc_url: url, android_url: url, ios_url: url },
+          }],
+        },
+        { tag: 'markdown', content: "Browser didn't open? Copy this URL:\n" + url },
         { tag: 'hr' },
-        { tag: 'markdown', content: '**Step 2:** After authorizing, you will see a code. Copy the entire code and paste it here.' },
+        { tag: 'markdown', content: '**Step 2:** After authorizing, copy the code from the page and paste it here.' },
       ],
     });
 
