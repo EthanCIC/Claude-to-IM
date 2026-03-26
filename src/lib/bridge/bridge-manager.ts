@@ -1400,8 +1400,26 @@ async function handleMessage(
             store.setAuthToken?.(senderOpenId, storedToken);
             console.log(`[bridge-manager] Token refreshed successfully for ${senderOpenId.slice(0, 12)}`);
           } catch (refreshErr) {
-            console.error(`[bridge-manager] Token refresh failed for ${senderOpenId.slice(0, 12)}:`, refreshErr instanceof Error ? refreshErr.message : refreshErr);
-            storedToken = null;
+            const errMsg = refreshErr instanceof Error ? refreshErr.message : String(refreshErr);
+            console.error(`[bridge-manager] Token refresh failed for ${senderOpenId.slice(0, 12)}:`, errMsg);
+            if (errMsg.includes('rate_limit') || errMsg.includes('Rate limited')) {
+              // Rate limit — tell user to wait, don't send auth card
+              console.warn(`[bridge-manager] Token refresh rate limited for ${senderOpenId.slice(0, 12)}`);
+              if (previewState) {
+                if (previewState.throttleTimer) clearTimeout(previewState.throttleTimer);
+                previewState = null;
+              }
+              state.activeTasks.delete(binding.codepilotSessionId);
+              syncActiveTasksToHost();
+              await deliver(adapter, {
+                address: msg.address,
+                text: 'Your session token is being refreshed. Please try again in a few minutes.',
+                parseMode: 'plain',
+              });
+              return;
+            } else {
+              storedToken = null; // genuinely invalid — will trigger auth card
+            }
           }
         } else {
           console.log(`[bridge-manager] Token expired, no refresh_token for ${senderOpenId.slice(0, 12)}`);
