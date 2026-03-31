@@ -256,6 +256,8 @@ export interface StreamChatParams {
   userRole?: import('./types.js').UserRole;
   /** Per-user config directory path (injected as CLAUDE_CONFIG_DIR for auth + MCP). */
   userConfigDir?: string;
+  /** Effort level for Claude reasoning (low/medium/high/max). */
+  effort?: import('./types.js').EffortLevel;
 }
 
 export interface LLMProvider {

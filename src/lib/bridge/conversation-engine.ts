@@ -170,6 +170,9 @@ export async function processMessage(
     const userPrefs = senderOpenId ? store.getUserPreferences?.(senderOpenId) : null;
     const effectiveModel = userPrefs?.preferred_model || binding.model || session?.model || store.getSetting('default_model') || undefined;
 
+    // Effective effort: per-user preference → daemon default (medium)
+    const effectiveEffort = userPrefs?.preferred_effort || (store.getSetting('default_effort') as import('./types.js').EffortLevel | null) || 'medium';
+
     // Permission mode from binding mode
     let permissionMode: string;
     switch (binding.mode) {
@@ -241,6 +244,7 @@ export async function processMessage(
       },
       userRole,
       userConfigDir,
+      effort: effectiveEffort,
     });
 
     // Consume the stream server-side (replicate collectStreamResponse pattern).

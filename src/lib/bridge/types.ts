@@ -224,9 +224,13 @@ export const PLATFORM_LIMITS: Record<string, number> = {
 
 // ── User Preferences ────────────────────────────────────────
 
-/** Per-user preferences (model selection, etc.). */
+/** Valid effort levels for Claude reasoning. */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+
+/** Per-user preferences (model, effort, etc.). */
 export interface UserPreferences {
   preferred_model?: string;
+  preferred_effort?: EffortLevel;
   updated_at: string; // ISO timestamp
 }
 

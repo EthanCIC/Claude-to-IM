@@ -7,7 +7,7 @@
  * Uses globalThis to survive Next.js HMR in development.
  */
 
-import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, UserRole, FileAttachment, ChannelAddress } from './types.js';
+import type { BridgeStatus, InboundMessage, OutboundMessage, StreamingPreviewState, UserRole, FileAttachment, ChannelAddress, EffortLevel } from './types.js';
 import type { InterruptedTask, ActiveTaskInfo } from './host.js';
 import { createAdapter, getRegisteredTypes } from './channel-adapter.js';
 import type { BaseChannelAdapter } from './channel-adapter.js';
@@ -43,6 +43,8 @@ const MODEL_ALIASES: Record<string, string> = {
 function resolveModelName(input: string): string {
   return MODEL_ALIASES[input.toLowerCase()] ?? input;
 }
+
+const VALID_EFFORTS = new Set<EffortLevel>(['low', 'medium', 'high', 'max']);
 
 // ── Per-user OAuth auth card ─────────────────────────────────
 
@@ -1711,6 +1713,7 @@ async function handleCommand(
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
         '/model [name|reset] - Set your preferred model',
+        '/effort [low|medium|high|max] - Set effort level',
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop, /cancel - 停止當前任務',
@@ -1820,6 +1823,7 @@ async function handleCommand(
         `CWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
         `Mode: <b>${binding.mode}</b>`,
         `Model: <code>${statusModel}</code>${statusSource}`,
+        `Effort: <code>${statusUserPrefs?.preferred_effort || store.getSetting('default_effort') || 'medium'}</code>${statusUserPrefs?.preferred_effort ? ' (user)' : ' (default)'}`,
       ].join('\n');
       break;
     }
@@ -1914,6 +1918,7 @@ async function handleCommand(
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
         '/model [name|reset] - Set your preferred model',
+        '/effort [low|medium|high|max] - Set effort level',
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop, /cancel - 停止當前任務',
@@ -1995,6 +2000,68 @@ async function handleCommand(
         summary: `[CMD] /model ${resolvedModel} → user=${senderOpenId.slice(0, 12)}`,
       });
       response = `Model set to <code>${escapeHtml(resolvedModel)}</code>`;
+      break;
+    }
+
+    case '/effort': {
+      const effortOpenId = msg.address.userId;
+      if (!effortOpenId) {
+        response = 'Cannot identify user. Effort preference not saved.';
+        break;
+      }
+
+      if (!args || args === '') {
+        const effortUserPrefs = store.getUserPreferences?.(effortOpenId);
+        const currentEffort = effortUserPrefs?.preferred_effort || store.getSetting('default_effort') || 'medium';
+        response = [
+          `<b>Current Effort</b>`,
+          ``,
+          `Effort: <code>${currentEffort}</code>${effortUserPrefs?.preferred_effort ? ' (user)' : ' (default)'}`,
+          ``,
+          `<b>Usage:</b> /effort low|medium|high|max`,
+          `/effort reset — clear preference, use default`,
+        ].join('\n');
+        break;
+      }
+
+      if (args.toLowerCase() === 'reset') {
+        const existing = store.getUserPreferences?.(effortOpenId);
+        store.setUserPreferences?.(effortOpenId, {
+          ...existing,
+          preferred_effort: undefined,
+          updated_at: new Date().toISOString(),
+        });
+        store.insertAuditLog({
+          channelType: adapter.channelType,
+          chatId: msg.address.chatId,
+          direction: 'inbound',
+          messageId: msg.messageId,
+          summary: `[CMD] /effort reset → user=${effortOpenId.slice(0, 12)}`,
+        });
+        response = 'Effort preference cleared. Using default.';
+        break;
+      }
+
+      const effortLevel = args.toLowerCase() as EffortLevel;
+      if (!VALID_EFFORTS.has(effortLevel)) {
+        response = `Invalid effort level. Use: low, medium, high, max`;
+        break;
+      }
+
+      const existingPrefs = store.getUserPreferences?.(effortOpenId);
+      store.setUserPreferences?.(effortOpenId, {
+        ...existingPrefs,
+        preferred_effort: effortLevel,
+        updated_at: new Date().toISOString(),
+      });
+      store.insertAuditLog({
+        channelType: adapter.channelType,
+        chatId: msg.address.chatId,
+        direction: 'inbound',
+        messageId: msg.messageId,
+        summary: `[CMD] /effort ${effortLevel} → user=${effortOpenId.slice(0, 12)}`,
+      });
+      response = `Effort set to <code>${effortLevel}</code>`;
       break;
     }
 
