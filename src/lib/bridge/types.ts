@@ -222,6 +222,14 @@ export const PLATFORM_LIMITS: Record<string, number> = {
   qq: 2000,
 };
 
+// ── User Preferences ────────────────────────────────────────
+
+/** Per-user preferences (model selection, etc.). */
+export interface UserPreferences {
+  preferred_model?: string;
+  updated_at: string; // ISO timestamp
+}
+
 // ── OAuth ───────────────────────────────────────────────────
 
 /** Stored OAuth token for per-user authentication. */

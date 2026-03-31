@@ -74,6 +74,7 @@ export async function processMessage(
   onToolUse?: OnToolUse,
   userRole?: UserRole,
   userConfigDir?: string,
+  senderOpenId?: string,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -165,8 +166,9 @@ export async function processMessage(
       if (defaultId) resolvedProvider = store.getProvider(defaultId);
     }
 
-    // Effective model
-    const effectiveModel = binding.model || session?.model || store.getSetting('default_model') || undefined;
+    // Effective model: per-user preference → binding → session → daemon default
+    const userPrefs = senderOpenId ? store.getUserPreferences?.(senderOpenId) : null;
+    const effectiveModel = userPrefs?.preferred_model || binding.model || session?.model || store.getSetting('default_model') || undefined;
 
     // Permission mode from binding mode
     let permissionMode: string;

@@ -219,6 +219,12 @@ export interface BridgeStore {
   getChannelOffset(key: string): string;
   setChannelOffset(key: string, offset: string): void;
 
+  // ── User preferences (per-user model, etc.) ──
+  /** Retrieve stored preferences for a user, or null if none set. */
+  getUserPreferences?(openId: string): import('./types.js').UserPreferences | null;
+  /** Store preferences for a user. */
+  setUserPreferences?(openId: string, prefs: import('./types.js').UserPreferences): void;
+
   // ── Auth tokens (per-user OAuth) ──
   /** Retrieve stored OAuth token for a user, or null if not authorized. */
   getAuthToken?(openId: string): import('./types.js').OAuthToken | null;

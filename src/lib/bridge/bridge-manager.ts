@@ -31,6 +31,19 @@ import {
 
 const GLOBAL_KEY = '__bridge_manager__';
 
+// ── Model aliases (shorthand → full model ID) ───────────────
+
+const MODEL_ALIASES: Record<string, string> = {
+  'opus': 'claude-opus-4-6',
+  'sonnet': 'claude-sonnet-4-6',
+  'haiku': 'claude-haiku-4-5-20251001',
+};
+
+/** Resolve a model name: check alias map first, then pass through as-is. */
+function resolveModelName(input: string): string {
+  return MODEL_ALIASES[input.toLowerCase()] ?? input;
+}
+
 // ── Per-user OAuth auth card ─────────────────────────────────
 
 import type { OAuthManager } from './auth/oauth-manager.js';
@@ -1476,7 +1489,7 @@ async function handleMessage(
       if (previewState.lastSentAt > 0 || previewState.pendingText.length > 0) {
         finalizePreviewSegment(adapter, previewState, streamCfg!, msg.address.chatId);
       }
-    } : undefined, userRole, resolvedConfigDir);
+    } : undefined, userRole, resolvedConfigDir, senderOpenId);
 
     // ── User-initiated abort: skip delivery & error notification ──
     // sdkSessionId preserved (not cleared), session stays alive.
@@ -1697,6 +1710,7 @@ async function handleCommand(
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
+        '/model [name|reset] - Set your preferred model',
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop, /cancel - 停止當前任務',
@@ -1795,13 +1809,17 @@ async function handleCommand(
 
     case '/status': {
       const binding = router.resolve(msg.address);
+      const statusOpenId = msg.address.userId;
+      const statusUserPrefs = statusOpenId ? store.getUserPreferences?.(statusOpenId) : null;
+      const statusModel = statusUserPrefs?.preferred_model || binding.model || 'default';
+      const statusSource = statusUserPrefs?.preferred_model ? ' (user)' : binding.model ? ' (group)' : '';
       response = [
         '<b>Bridge Status</b>',
         '',
         `Session: <code>${binding.codepilotSessionId.slice(0, 8)}...</code>`,
         `CWD: <code>${escapeHtml(binding.workingDirectory || '~')}</code>`,
         `Mode: <b>${binding.mode}</b>`,
-        `Model: <code>${binding.model || 'default'}</code>`,
+        `Model: <code>${statusModel}</code>${statusSource}`,
       ].join('\n');
       break;
     }
@@ -1895,6 +1913,7 @@ async function handleCommand(
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
+        '/model [name|reset] - Set your preferred model',
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop, /cancel - 停止當前任務',
@@ -1902,6 +1921,82 @@ async function handleCommand(
         '/help - Show this help',
       ].join('\n');
       break;
+
+    case '/model': {
+      const senderOpenId = msg.address.userId;
+      if (!senderOpenId) {
+        response = 'Cannot identify user. Model preference not saved.';
+        break;
+      }
+
+      if (!args || args === '') {
+        // Show current effective model and resolution source
+        const binding = router.resolve(msg.address);
+        const userPrefs = store.getUserPreferences?.(senderOpenId);
+        const session = store.getSession(binding.codepilotSessionId);
+        const defaultModel = store.getSetting('default_model');
+
+        let source = 'CLI default';
+        let model = 'default';
+        if (userPrefs?.preferred_model) {
+          source = 'user preference';
+          model = userPrefs.preferred_model;
+        } else if (binding.model) {
+          source = 'group binding';
+          model = binding.model;
+        } else if (session?.model) {
+          source = 'session';
+          model = session.model;
+        } else if (defaultModel) {
+          source = 'daemon default';
+          model = defaultModel;
+        }
+
+        const aliasNames = Object.entries(MODEL_ALIASES).map(([k, v]) => `${k} → ${v}`).join('\n');
+        response = [
+          `<b>Current Model</b>`,
+          ``,
+          `Model: <code>${escapeHtml(model)}</code>`,
+          `Source: ${source}`,
+          ``,
+          `<b>Usage:</b>`,
+          `/model &lt;name&gt; — set your preferred model`,
+          `/model reset — clear preference, use default`,
+          ``,
+          `<b>Aliases:</b>`,
+          aliasNames,
+        ].join('\n');
+        break;
+      }
+
+      if (args.toLowerCase() === 'reset') {
+        store.setUserPreferences?.(senderOpenId, { updated_at: new Date().toISOString() });
+        store.insertAuditLog({
+          channelType: adapter.channelType,
+          chatId: msg.address.chatId,
+          direction: 'inbound',
+          messageId: msg.messageId,
+          summary: `[CMD] /model reset → user=${senderOpenId.slice(0, 12)}`,
+        });
+        response = 'Model preference cleared. Using default.';
+        break;
+      }
+
+      const resolvedModel = resolveModelName(args);
+      store.setUserPreferences?.(senderOpenId, {
+        preferred_model: resolvedModel,
+        updated_at: new Date().toISOString(),
+      });
+      store.insertAuditLog({
+        channelType: adapter.channelType,
+        chatId: msg.address.chatId,
+        direction: 'inbound',
+        messageId: msg.messageId,
+        summary: `[CMD] /model ${resolvedModel} → user=${senderOpenId.slice(0, 12)}`,
+      });
+      response = `Model set to <code>${escapeHtml(resolvedModel)}</code>`;
+      break;
+    }
 
     case '/logout': {
       const senderOpenId = msg.address.userId;
