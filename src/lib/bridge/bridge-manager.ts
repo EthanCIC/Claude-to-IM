@@ -1702,24 +1702,7 @@ async function handleCommand(
 
   switch (command) {
     case '/start':
-      response = [
-        '<b>CodePilot Bridge</b>',
-        '',
-        'Send any message to interact with Claude.',
-        '',
-        '<b>Commands:</b>',
-        '/new [path] - Start new session',
-        '/bind &lt;session_id&gt; - Bind to existing session',
-        '/cwd /path - Change working directory',
-        '/mode plan|code|ask - Change mode',
-        '/model [name|reset] - Set your preferred model',
-        '/effort [low|medium|high|max] - Set effort level',
-        '/status - Show current status',
-        '/sessions - List recent sessions',
-        '/stop, /cancel - 停止當前任務',
-        '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission',
-        '/help - Show this help',
-      ].join('\n');
+      response = '直接傳訊息就能開始對話。輸入 /help 查看所有指令。';
       break;
 
     case '/new': {
@@ -1911,19 +1894,24 @@ async function handleCommand(
 
     case '/help':
       response = [
-        '<b>CodePilot Bridge Commands</b>',
+        '<b>指令說明</b>',
         '',
-        '/new [path] - Start new session',
-        '/bind &lt;session_id&gt; - Bind to existing session',
-        '/cwd /path - Change working directory',
-        '/mode plan|code|ask - Change mode',
-        '/model [name|reset] - Set your preferred model',
-        '/effort [low|medium|high|max] - Set effort level',
-        '/status - Show current status',
-        '/sessions - List recent sessions',
-        '/stop, /cancel - 停止當前任務',
-        '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission request',
-        '/help - Show this help',
+        '<b>常用</b>',
+        '/new [路徑]  開新對話（可指定工作目錄）',
+        '/stop  停止當前任務',
+        '/status  查看目前狀態（模型、session、目錄）',
+        '',
+        '<b>個人偏好</b>',
+        '/model [名稱]  切換模型（opus / sonnet / haiku）',
+        '/model reset  恢復預設',
+        '/effort [等級]  調整回應深度（low / medium / high / max）',
+        '/mode [模式]  切換模式（code / plan / ask）',
+        '',
+        '<b>進階</b>',
+        '/sessions  列出最近的 session',
+        '/bind &lt;id&gt;  綁定到指定 session',
+        '/cwd /路徑  切換工作目錄',
+        '/perm allow|deny &lt;id&gt;  回應權限請求',
       ].join('\n');
       break;
 
